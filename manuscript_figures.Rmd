@@ -1,0 +1,2123 @@
+---
+title: "IBS: final set of figures for the manuscript"
+author: "Kevin Vervier"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+In this analysis, we use longitudinal data for IBS patients and matched households. 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,echo=F}
+#package install/load
+if(!require(vegan)){
+  install.packages('vegan')
+  library(vegan)
+}
+if(!require(zCompositions)){
+  install.packages('zCompositions')
+  library(zCompositions)
+} 
+ 
+if(!require(phyloseq)){
+  install.packages('phyloseq')
+  library(phyloseq)
+}
+if(!require(Maaslin2)){
+  install.packages('Maaslin2')
+  library(Maaslin2)
+}
+
+if(!require(knitr)){
+  install.packages('knitr')
+  library(knitr)
+}
+
+if(!require(ggpubr)){
+  install.packages('ggpubr')
+  library(ggpubr)
+}
+
+if(!require(cowplot)){
+  install.packages('cowplot')
+  library(cowplot)
+}
+
+if(!require(RColorBrewer)){
+  install.packages('RColorBrewer')
+  library(RColorBrewer)
+}
+
+mypalette<-c('darkviolet','darkgreen','dodgerblue','darkorange','red','gold')
+palette.redblue <- rev(brewer.pal(11, "RdBu"))
+set.seed(1)
+```
+
+```{r}
+# Please insert the name of the Kraken output file (raw/normalized)
+MYDATAFILE = 'data/merged_S.bracken'
+
+# Please insert the name of the metadata file (first column should be lane ID, second column should be group ID)
+MYMETADATAFILE = 'data/sample_working_list.txt'
+```
+
+```{r}
+# read metadata
+metadata = read.delim(MYMETADATAFILE,header=FALSE)
+metadata = metadata[,-2]
+
+questionnaire = metadata[,c(1:5,8:54)]
+colnames(questionnaire)[1] = 'Lane'
+colnames(questionnaire)[3] = 'Time.point'
+  
+metadata = metadata[,c(1:5)]
+colnames(metadata) = c('sangerID','patient','time','group','pair')
+  
+# read abundance info
+dat = read.delim(MYDATAFILE,header = TRUE,stringsAsFactors=FALSE,check.names = FALSE)
+
+# change columns name to only keep the Sanger lane ID
+colnames(dat) = gsub(x = colnames(dat),pattern = '.bracken',replacement = '')
+
+# FIX: remove multiple columns created due to bug in metagm_classifiy.py (now fixed)
+dat = dat[,!duplicated(colnames(dat))]
+
+```
+
+# Overall Kraken performance
+
+## with reference database
+```{r}
+
+dat.kraken = read.delim('data/merged_raw.txt',
+                 header=FALSE,stringsAsFactors=FALSE)
+dim(dat.kraken)
+
+colnames(dat.kraken) = c('taxid','rank','name',dat.kraken[1,-c(1,ncol(dat.kraken)-1,ncol(dat.kraken))])
+dat.kraken = dat.kraken[-1,]
+
+# remove bracken file columns
+#dat.kraken = dat.kraken[,-grep(pattern = 'bracken',x = colnames(dat.kraken))]
+
+# unclassified rate
+classif = as.numeric(dat.kraken[which(dat.kraken$rank == 'R'),-c(1:3)])
+unclassif = as.numeric(dat.kraken[which(dat.kraken$rank == 'U'),-c(1:3)])
+
+names(unclassif) = colnames(dat.kraken[which(dat.kraken$rank == 'U'),-c(1:3)])
+
+boxplot(100*(classif/(unclassif+classif)),ylim=c(0,100),ylab='read classification rate(%)')
+median(100*(classif/(unclassif+classif))) #86.14% classification rate in median
+```
+
+```{r}
+df = data.frame(classif.rate=100*(classif/(unclassif+classif)),db='ours')
+p <- ggboxplot(df, x = "db", y = 'classif.rate',
+                color = "db", palette =c("black"),
+                add = "jitter") + xlab('') + ylab('read classification rate(%)') + rremove('legend') + ylim(0,100) + rremove('x.ticks') + rremove('x.text')
+p
+
+initial_grid <- plot_grid(p,
+          labels=c(''),ncol=1)
+ 
+svg(filename = 'classifrate.svg',width = 5, height =5)
+ ggdraw(initial_grid) +
+   draw_plot(initial_grid)
+ dev.off()
+```
+
+
+# Comparing Case and Control at Baseline (time = A)
+
+
+```{r}
+tmp = dat[,c(1,grep(colnames(dat),pattern = '_num'))]
+row.names(tmp) = tmp$name
+colnames(tmp) = gsub(x = colnames(tmp),pattern = '_S_num',replacement = '')
+
+tmp = t(tmp[,-1])
+tmp = tmp[order(row.names(tmp)),]
+metadata = metadata[order(metadata$sangerID),]
+
+#length(intersect(row.names(tmp),metadata$sangerID)) = 50
+
+metadata = metadata[which(metadata$sangerID %in% intersect(row.names(tmp),metadata$sangerID)),]
+tmp = tmp[which(row.names(tmp) %in% intersect(row.names(tmp),metadata$sangerID)),]
+row.names(metadata) = row.names(tmp)
+```
+
+```{r}
+
+idx = which(metadata$time == 'A') # 97 - 49 Case and 48 Control
+idx2 = names(which(table(metadata$pair[idx]) == 1)) # three pairs incomplete
+sub.meta = metadata[-which(metadata$pair %in% idx2),]
+sub.tmp = tmp[-which(metadata$pair %in% idx2),]
+sub.tmp = sub.tmp[which(sub.meta$time == 'A'),]
+sub.meta = sub.meta[which(sub.meta$time == 'A'),] # 56 pairs
+ps <- phyloseq(sample_data(sub.meta),
+                 otu_table(sub.tmp, taxa_are_rows = FALSE))
+```
+
+```{r}
+dim(ps@otu_table)
+```
+
+Difference in number of reads between groups:
+```{r}
+count = apply(ps@otu_table,1,sum)
+wilcox.test(count[which(ps@sam_data$group == 'Case')], 
+            count[which(ps@sam_data$group == 'Control')])
+```
+
+
+Diversity and richness measurements:
+
+```{r}
+my_comparisons <- list( c(unique(ps@sam_data$group)[2],unique(ps@sam_data$group)[1]) )
+richness = estimate_richness(ps)
+
+df = data.frame('group'=ps@sam_data$group,'richness'=richness$Chao1)
+
+p <- ggboxplot(df, x = "group", y = names(df)[2],
+                color = "group", palette =c("#00AFBB", "#E7B800", "#FC4E07"),
+                add = "jitter")
+ palphachao <- p + stat_compare_means(label= 'p.signif',comparisons = my_comparisons,paired=TRUE) + ylab('Chao1 diversity') + rremove('legend') + xlab('')
+
+df = data.frame('group'=ps@sam_data$group,'richness'=richness$Shannon)
+
+p <- ggboxplot(df, x = "group", y = names(df)[2],
+                color = "group", palette =c("#00AFBB", "#E7B800", "#FC4E07"),
+                add = "jitter")
+
+palphashannon <- p + stat_compare_means(label= 'p.signif',comparisons = my_comparisons,paired=TRUE) + ylab('Shannon diversity') + rremove('legend')  + xlab('')
+
+ initial_grid <- plot_grid(palphachao,palphashannon,
+          labels=c('(A)','(B)'),ncol=2)
+ 
+svg(filename = 'alphadiversity.svg',width = 7, height =4)
+ ggdraw(initial_grid) +
+   draw_plot(initial_grid)
+ dev.off()
+```
+
+```{r}
+#paper ready version --> shapes > color
+
+df = data.frame('group'=ps@sam_data$group,'richness'=richness$Chao1)
+
+p <- ggboxplot(df, x = "group", y = names(df)[2],
+                add = "jitter")
+ palphachao.black <- p + stat_compare_means(label= 'p.signif',comparisons = my_comparisons,paired=TRUE) + ylab('Chao1 diversity') + rremove('legend') + xlab('')
+
+df = data.frame('group'=ps@sam_data$group,'richness'=richness$Shannon)
+
+p <- ggboxplot(df, x = "group", y = names(df)[2],
+                add = "jitter")
+
+palphashannon.black <- p + stat_compare_means(label= 'p.signif',comparisons = my_comparisons,paired=TRUE) + ylab('Shannon diversity') + rremove('legend')  + xlab('')
+
+ initial_grid <- plot_grid(palphachao.black,palphashannon.black,
+          labels=c('(A)','(B)'),ncol=2)
+ 
+svg(filename = 'alphadiversity_black.svg',width = 7, height =4)
+ ggdraw(initial_grid) +
+   draw_plot(initial_grid)
+ dev.off()
+```
+
+# Transformation to CoDA
+```{r}
+sum(ps@otu_table == 0)
+100*sum(ps@otu_table == 0)/length(ps@otu_table)
+
+prevalence = 100*apply(ps@otu_table,2,function(x) sum(x>0)/length(x))
+total.read.count = apply(ps@otu_table,2,sum)
+
+```
+
+## Filter rare taxa -->NONE
+```{r}
+#  Define prevalence threshold as 10% of total samples
+prevalenceThreshold = 0.1 * nsamples(ps)
+prevalenceThreshold
+
+# Execute prevalence filter, using `prune_taxa()` function
+keepTaxa = names(prevalence)[(prevalence >= prevalenceThreshold)]
+ps1 = prune_taxa(keepTaxa, ps)
+
+```
+
+## Estimate zeros
+```{r}
+d.czm <- cmultRepl(ps1@otu_table,  label=0, method="CZM")
+d.clr <- t(apply(d.czm, 1, function(x){log(x) - mean(log(x))}))
+ps2 = ps1
+ps2@otu_table = otu_table(d.clr, taxa_are_rows = FALSE)
+
+
+dis<-dist(as.matrix(ps2@otu_table),method='euclidean')
+# equivalent to Aitchinson distance: Eucidean on CLR profiles
+
+mod<-betadisper(dis,ps2@sam_data$group)
+
+```
+
+
+### Intra/Inter-pair variability
+```{r}
+dis = as.matrix(dis)
+intra = NULL
+inter = NULL
+for(p in unique(ps2@sam_data$pair)){
+  intra = c(intra,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$group == 'Control')],ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$group == 'Case' )]])
+  
+  inter = c(inter,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$group == 'Control')],ps2@sam_data$sangerID[which(ps2@sam_data$pair!=p & ps2@sam_data$group == 'Case')]])
+  
+}
+
+df = data.frame('dist' = c(intra,inter),
+                'group' = c(rep('intra',length(intra)),rep('inter',length(inter))))
+
+
+p <- ggboxplot(df, x = "group", y = "dist",
+                color = "group", palette =mypalette,
+                add = "jitter")
+p + stat_compare_means(comparisons = list(c('intra','inter')))    + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ylab('Aitchison distance')
+
+#inter: refers to distance between one control and all cases that are not households
+#intra: refers to distance between one control and its paired case
+
+
+
+dis = as.matrix(dis)
+
+intra.spf = dis[ps2@sam_data$sangerID[which(ps2@sam_data$group=='Control')],ps2@sam_data$sangerID[which(ps2@sam_data$group=='Control')]][upper.tri(dis[ps2@sam_data$sangerID[which(ps2@sam_data$group=='Control')],ps2@sam_data$sangerID[which(ps2@sam_data$group=='Control')]])]
+
+intra.ch = dis[ps2@sam_data$sangerID[which(ps2@sam_data$group=='Case')],ps2@sam_data$sangerID[which(ps2@sam_data$group=='Case')]][upper.tri(dis[ps2@sam_data$sangerID[which(ps2@sam_data$group=='Case')],ps2@sam_data$sangerID[which(ps2@sam_data$group=='Case')]])]
+
+inter = dis[ps2@sam_data$sangerID[which(ps2@sam_data$group=='Case')],ps2@sam_data$sangerID[which(ps2@sam_data$group=='Control')]][upper.tri(dis[ps2@sam_data$sangerID[which(ps2@sam_data$group=='Case')],ps2@sam_data$sangerID[which(ps2@sam_data$group=='Control')]])]
+
+df = data.frame('group'=c(rep('intra.pair',length(intra)),
+                        rep('intra.Control',length(intra.spf)),
+                         rep('intra.Case',length(intra.ch)),
+                          rep('inter.group',length(inter))),
+                'beta' = c(intra,intra.spf,intra.ch,inter))
+
+wilcox.test(df$beta[which(df$group=='inter.group')],df$beta[which(df$group=='intra.Case')])$p.value
+wilcox.test(df$beta[which(df$group=='intra.Control')],df$beta[which(df$group=='intra.Case')])$p.value
+
+
+p <- ggboxplot(df, x = "group", y = "beta",
+                color = "group", palette =mypalette,
+                add = "jitter")
+p + stat_compare_means(comparisons = list(c('intra.pair','intra.Control'),c('intra.pair','intra.Case'),c('intra.pair','inter.group'),c('intra.Control','intra.Case'),c('intra.Control','inter.group'),c('intra.Case','inter.group')))    + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ylab('Aitchison distance')
+
+```
+
+
+```{r}
+
+df$group = factor(df$group,levels = c('intra.Case','intra.Control','intra.pair','inter.group'))
+p <- ggboxplot(df, x = "group", y = "beta",
+                color = "group", palette =mypalette[c(2,3,4,1)],
+                add = "jitter")
+pbeta <- p + stat_compare_means(label= 'p.signif', comparisons = list(c('intra.pair','intra.Control'),c('intra.pair','intra.Case'),c('intra.pair','inter.group'),c('intra.Control','intra.Case'),c('intra.Control','inter.group'),c('intra.Case','inter.group'))) + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ylab('Aitchison distance') + xlab('') + rremove("legend")
+
+pbeta
+```
+
+```{r}
+
+df$group = factor(df$group,levels = c('intra.Case','intra.Control','intra.pair','inter.group'))
+p <- ggboxplot(df, x = "group", y = "beta",
+                color = "group", palette =mypalette[c(2,3,4,1)])
+pbeta.nojitter <- p + stat_compare_means(label= 'p.signif', comparisons = list(c('intra.pair','intra.Control'),c('intra.pair','intra.Case'),c('intra.pair','inter.group'),c('intra.Control','intra.Case'),c('intra.Control','inter.group'),c('intra.Case','inter.group'))) + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ylab('Aitchison distance') + xlab('') + rremove("legend")
+
+pbeta.nojitter
+```
+
+```{r}
+initial_grid <- plot_grid(palphachao,palphashannon,
+          labels=c('(A)','(B)'),ncol=2)
+nested_grid <- plot_grid(initial_grid,pbeta,labels=c('','(C)'),ncol=1)
+  
+svg(filename = 'precluster_diversity.svg',width = 7, height =8)
+ ggdraw(nested_grid) +
+   draw_plot(nested_grid)
+ dev.off()
+
+```
+
+
+```{r}
+initial_grid <- plot_grid(palphachao.black,palphashannon.black,
+          labels=c('(A)','(B)'),ncol=2)
+nested_grid <- plot_grid(initial_grid,pbeta.nojitter,labels=c('','(C)'),ncol=1)
+  
+svg(filename = 'precluster_diversity_shape.svg',width = 7, height =8)
+ ggdraw(nested_grid) +
+   draw_plot(nested_grid)
+ dev.off()
+
+```
+
+### Patient clustering
+```{r}
+idx = ps2@sam_data$sangerID[which(ps2@sam_data$group == 'Case' )]
+sub.dis = dis[idx,idx]
+
+mydata <- sub.dis
+wss <- (nrow(mydata)-1)*sum(apply(mydata,2,var))
+  for (i in 2:15) wss[i] <- sum(kmeans(decostand(sub.dis, "hell"),
+                                       centers=i)$withinss)
+plot(1:15, wss, type="b", xlab="Number of Clusters",
+     ylab="Within groups sum of squares") 
+
+ ckm <- kmeans(decostand(sub.dis, "hell"), 2)
+ clusters <- ckm$cluster
+
+ table(clusters)
+ 
+cluster1 = sub.dis[names(clusters)[which(clusters == 1)],names(clusters)[which(clusters == 1)]] # 28 patients
+ 
+cluster2 = sub.dis[names(clusters)[which(clusters == 2)],names(clusters)[which(clusters == 2)]] #28 patients
+
+inter = sub.dis[names(clusters)[which(clusters == 1)],names(clusters)[which(clusters == 2)]]
+
+
+```
+
+```{r}
+#paper ready
+df = data.frame('dist' = c(cluster1[upper.tri(cluster1)],cluster2[upper.tri(cluster2)],inter[upper.tri(inter)]),
+                'group' = c(rep('cl1',length(cluster1[upper.tri(cluster1)])),rep('cl2',length(cluster2[upper.tri(cluster2)])),rep('between',length(inter[upper.tri(inter)]))))
+
+df$group = factor(df$group,levels = c('cl1','cl2','between'))
+
+p <- ggboxplot(df, x = "group", y = "dist",
+                color = "group", palette =c('firebrick2','dodgerblue','grey30'),
+                add = "jitter")
+pbetacluster <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('cl1','between'),c('cl2','between'),c('cl1','cl2'))) + ylab('Aitchison distance') + xlab('') + rremove('legend')
+
+pbetacluster
+```
+
+## patient cluster comparison
+```{r}
+sub.dis <- dist(as.matrix(ps2@otu_table)[idx,],method='euclidean')
+
+
+cluster.label = rep('IBS1',length(idx))
+names(cluster.label) = idx
+cluster.label[names(clusters)[which(clusters == 1)]] = 'IBS2'
+
+
+mod<-betadisper(sub.dis,cluster.label)
+```
+
+```{r}
+#paper ready
+df.pcoa = data.frame(x=mod$vectors[,1],y=mod$vectors[,2],group=mod$group)
+centroids = data.frame(x=mod$centroids[,1],y=mod$centroids[,2],group = factor(rownames(mod$centroids)))
+ 
+gg <- merge(df.pcoa,centroids, by ='group', suffixes = c('','.centroid')) 
+
+gg$group = factor(gsub(pattern = 'IBS',replacement = 'cl',x=gg$group))
+centroids$group = factor(gsub(pattern = 'IBS',replacement = 'cl',x=centroids$group))
+
+pibscluster <- ggplot(gg) +
+  geom_point(aes(x=x,y=y,color=group),size=1) + scale_color_manual(values = c('firebrick2','dodgerblue')) +
+  geom_point(data=centroids,aes(x=x,y=y,color=group),size=3)+
+  geom_segment(aes(x=x.centroid, y =y.centroid, xend=x,yend=y,color=group)) +
+  xlab(paste('PCoA1 (',100*round(mod$eig[1] / sum(mod$eig),2),'%)',sep='')) +
+  ylab(paste('PCoA2 (',100*round(mod$eig[2] / sum(mod$eig),2),'%)',sep='')) + theme_bw() + guides(col=guide_legend(nrow=2)) + labs(color='')
+
+```
+
+```{r}
+ initial_grid <- plot_grid(pibscluster,pbetacluster,
+          labels=c('(A)','(B)'),ncol=2)
+ 
+svg(filename = 'ibscluster.svg',width = 10, height =5)
+ ggdraw(initial_grid) +
+   draw_plot(initial_grid)
+ dev.off()
+ 
+```
+
+
+## MAaSLIN2 - 2 patient clusters + controls
+```{r, message=FALSE, warning=FALSE, results='hide'}
+
+ps2@sam_data$cluster = NA
+ps2@sam_data[names(cluster.label),6] = cluster.label
+
+ps@sam_data$cluster = ps2@sam_data$cluster
+  
+#find controls
+idx = which(is.na(ps2@sam_data$cluster))
+for(i in idx){
+  ps2@sam_data$cluster[i] = ps2@sam_data$cluster[which(ps2@sam_data$pair == ps2@sam_data$pair[i] & ps2@sam_data$group == 'Case')[1]]
+}
+#extend the cluster label to raw data
+ps@sam_data$cluster = ps2@sam_data$cluster
+  
+table(ps2@sam_data$cluster)/2 
+
+
+ps3 <-  phyloseq(sample_data(ps2@sam_data),
+                 otu_table(ps2@otu_table, taxa_are_rows = FALSE))
+
+sub.metadata2 = ps3@sam_data[,c('sangerID','pair','group','time','cluster')]
+sub.metadata2 = cbind(sub.metadata2,paste(sub.metadata2$cluster,sub.metadata2$time,sep='-'))
+colnames(sub.metadata2)[6] = 'ClusterxTime'
+colnames(sub.metadata2)[1] = 'Sample_ID'
+sub.metadata2 = cbind(sub.metadata2,paste(sub.metadata2$group,sub.metadata2$cluster,sub.metadata2$time,sep='-'))
+colnames(sub.metadata2)[7] = 'GroupxClusterxTime'
+sub.metadata2 = cbind(sub.metadata2,paste(sub.metadata2$group,sub.metadata2$cluster,sep='-'))
+colnames(sub.metadata2)[8] = 'GroupxCluster'
+sub.metadata2 = cbind(sub.metadata2,paste(sub.metadata2$group,sub.metadata2$time,sep='-'))
+colnames(sub.metadata2)[9] = 'GroupxTime'
+sub.metadata2 = cbind(sub.metadata2,paste(sub.metadata2$cluster,sub.metadata2$group,sep='-'))
+colnames(sub.metadata2)[10] = 'ClusterxGroup'
+idx = which(is.na(sub.metadata2$cluster))
+if(length(idx) >0) sub.metadata2 = sub.metadata2[-idx,]
+
+dir.create('MAaSLIN2_Coda_2clusters_withcontrols')
+write.table(sub.metadata2,file='MAaSLIN2_Coda_2clusters_withcontrols/metadata_2clusters_withcontrols.txt',sep = '\t',quote=F,col.names = T,row.names = F)
+
+relab = data.frame(ps3@otu_table)
+relab[,1] = row.names(relab)
+colnames(relab)[1] = 'Sample_ID'
+relab = relab[rownames(sub.metadata2),]
+row.names(relab) = NULL
+
+write.table(relab,file='MAaSLIN2_Coda_2clusters_withcontrols/abundances_norm.txt',sep = '\t',quote=F,col.names = T,row.names = F)
+```
+
+```{r,eval=T}
+fit_data <- Maaslin2(input_data = 'MAaSLIN2_Coda_2clusters_withcontrols/abundances_norm.txt',input_metadata = 'MAaSLIN2_Coda_2clusters_withcontrols/metadata_2clusters_withcontrols.txt',
+                     output='MAaSLIN2_Coda_2clusters_withcontrols',
+                     random_effects = 'pair',
+                     fixed_effects = c('group','GroupxCluster'),transform = 'NONE',normalization = 'NONE',analysis_method='LM',standardize=FALSE,max_significance = 0.1,plot_heatmap = FALSE,min_abundance = 0.2)
+
+
+```
+
+
+```{r}
+#create abundance plot from Maaslin results
+species='Bacteroides.stercorirosoris'
+
+df = data.frame(abundance = relab[,species],
+                group = sub.metadata2$ClusterxGroup,
+                case = sub.metadata2$group
+)
+
+df$group = factor(gsub(df$group,pattern = 'IBS',replacement = 'cl'))
+
+
+p <- ggboxplot(df, x = "group", y = "abundance",
+                color = "group",palette=c('firebrick2','firebrick2','dodgerblue','dodgerblue'),shape="case",
+                add = "jitter")
+ p.bsteco <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('cl1-Case','cl1-Control'),c('cl2-Case','cl2-Control'),c('cl1-Case','cl2-Case'),c('cl1-Control','cl2-Control'))) + ylab('CLR abundance') + xlab('') + rremove('legend') + ggtitle(species)  + font("title", face = "italic")
+
+#create abundance plot from Maaslin results
+species='Parabacteroides.merdae'
+
+df = data.frame(abundance = relab[,species],
+                group = sub.metadata2$ClusterxGroup,
+                case = sub.metadata2$group
+)
+
+df$group = factor(gsub(df$group,pattern = 'IBS',replacement = 'cl'))
+
+
+p <- ggboxplot(df, x = "group", y = "abundance",
+                color = "group",palette=c('firebrick2','firebrick2','dodgerblue','dodgerblue'),shape="case",
+                add = "jitter")
+pparamerda <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('cl1-Case','cl1-Control'),c('cl2-Case','cl2-Control'),c('cl1-Case','cl2-Case'),c('cl1-Control','cl2-Control'))) + ylab('CLR abundance') + xlab('') + rremove('legend') + ggtitle(species)  + font("title", face = "italic")
+
+#create abundance plot from Maaslin results
+species='Parabacteroides.gordonii'
+
+df = data.frame(abundance = relab[,species],
+                group = sub.metadata2$ClusterxGroup,
+                case = sub.metadata2$group
+)
+
+df$group = factor(gsub(df$group,pattern = 'IBS',replacement = 'cl'))
+
+
+p <- ggboxplot(df, x = "group", y = "abundance",
+                color = "group",palette=c('firebrick2','firebrick2','dodgerblue','dodgerblue'),shape="case",
+                add = "jitter")
+pparagordon <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('cl1-Case','cl1-Control'),c('cl2-Case','cl2-Control'),c('cl1-Case','cl2-Case'),c('cl1-Control','cl2-Control'))) + ylab('CLR abundance') + xlab('') + rremove('legend') + ggtitle(species)  + font("title", face = "italic")
+
+```
+
+
+```{r}
+ 
+ initial_grid <- plot_grid(pparamerda,p.bsteco,pparagordon,
+          labels=c('(A)','(B)','(C)'),ncol=3)
+ 
+svg(filename = 'bacteroides_timeA.svg',width = 15, height =5)
+ ggdraw(initial_grid) +
+   draw_plot(initial_grid)
+ dev.off()
+```
+
+
+```{r}
+#create abundance plot from Maaslin results
+species='Paeniclostridium.sordellii'
+
+df = data.frame(abundance = relab[,species],
+                group = sub.metadata2$ClusterxGroup,
+                case = sub.metadata2$group
+)
+
+df$group = factor(gsub(df$group,pattern = 'IBS',replacement = 'cl'))
+
+
+p <- ggboxplot(df, x = "group", y = "abundance",
+                color = "group",palette=c('firebrick2','firebrick2','dodgerblue','dodgerblue'),shape="case",
+                add = "jitter")
+ p.sordelli <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('cl1-Case','cl1-Control'),c('cl2-Case','cl2-Control'),c('cl1-Case','cl2-Case'),c('cl1-Control','cl2-Control'))) + ylab('CLR abundance') + xlab('') + rremove('legend') + ggtitle(species)  + font("title", face = "italic")
+
+#create abundance plot from Maaslin results
+species='Streptococcus.anginosus'
+
+df = data.frame(abundance = relab[,species],
+                group = sub.metadata2$ClusterxGroup,
+                case = sub.metadata2$group
+)
+
+df$group = factor(gsub(df$group,pattern = 'IBS',replacement = 'cl'))
+
+
+p <- ggboxplot(df, x = "group", y = "abundance",
+                color = "group",palette=c('firebrick2','firebrick2','dodgerblue','dodgerblue'),shape="case",
+                add = "jitter")
+pstrepto <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('cl1-Case','cl1-Control'),c('cl2-Case','cl2-Control'),c('cl1-Case','cl2-Case'),c('cl1-Control','cl2-Control'))) + ylab('CLR abundance') + xlab('') + rremove('legend') + ggtitle(species)  + font("title", face = "italic")
+
+#create abundance plot from Maaslin results
+#species='Clostridium_P.perfringens'
+species="Clostridioides.difficile_A"
+df = data.frame(abundance = relab[,species],
+                group = sub.metadata2$ClusterxGroup,
+                case = sub.metadata2$group
+)
+
+df$group = factor(gsub(df$group,pattern = 'IBS',replacement = 'cl'))
+species="Clostridium.difficile"
+
+p <- ggboxplot(df, x = "group", y = "abundance",
+                color = "group",palette=c('firebrick2','firebrick2','dodgerblue','dodgerblue'),shape="case",
+                add = "jitter")
+pperfringens <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('cl1-Case','cl1-Control'),c('cl2-Case','cl2-Control'),c('cl1-Case','cl2-Case'),c('cl1-Control','cl2-Control'))) + ylab('CLR abundance') + xlab('') + rremove('legend') + ggtitle(species)  + font("title", face = "italic")
+
+```
+
+
+```{r}
+ 
+ initial_grid <- plot_grid(pperfringens,p.sordelli,pstrepto,
+          labels=c('(A)','(B)','(C)'),ncol=3)
+ 
+svg(filename = 'badbugs_timeA.svg',width = 15, height =5)
+ ggdraw(initial_grid) +
+   draw_plot(initial_grid)
+ dev.off()
+```
+
+
+```{r}
+ 
+ initial_grid <- plot_grid(pparamerda,p.bsteco,pparagordon,pperfringens,p.sordelli,pstrepto,
+          labels=c('(A)','(B)','(C)','(D)','(E)','(F)'),ncol=3)
+ 
+svg(filename = 'combinedBugs_timeA.svg',width = 15, height =10)
+ ggdraw(initial_grid) +
+   draw_plot(initial_grid)
+ dev.off()
+```
+
+
+## alpha diversity between two clusters and controls
+```{r}
+sub.metadata = ps2@sam_data[,c('sangerID','pair','group')]
+sub.metadata$group = as.character(sub.metadata$group)
+sub.metadata[names(cluster.label),3] = cluster.label
+colnames(sub.metadata)[1] = 'Sample_ID'
+
+```
+
+## alpha diversity between two clusters and controls
+```{r}
+my_comparisons <- list( c('cl1-Case','cl2-Case'),c('cl1-Case','cl1-Control'),c('cl2-Case','cl2-Control'), c('cl2-Control','cl1-Control'))
+richness = estimate_richness(ps)
+
+df = data.frame('group'=paste(ifelse(ps@sam_data$cluster == 'IBS1',yes='cl1',no='cl2'),ps@sam_data$group,sep='-'),'richness'=richness$Chao1, 'case' = ps@sam_data$group)
+
+p <- ggboxplot(df, x = "group", y = names(df)[2],
+                color = "group",
+                add = "jitter",palette =c('firebrick2','firebrick2','dodgerblue','dodgerblue'),shape="case")
+palphaclusterchao <-p + stat_compare_means(label= 'p.signif',comparisons = my_comparisons) + ylab('Chao1 diversity') + rremove('legend') + xlab('')
+
+df = data.frame('group'=paste(ifelse(ps@sam_data$cluster == 'IBS1',yes='cl1',no='cl2'),ps@sam_data$group,sep='-'),'richness'=richness$Shannon, 'case' = ps@sam_data$group)
+
+p <- ggboxplot(df, x = "group", y = names(df)[2],
+                color = "group",
+                add = "jitter",palette =c('firebrick2','firebrick2','dodgerblue','dodgerblue'),shape="case")
+palphaclustershannon <- p + stat_compare_means(label= 'p.signif',comparisons = my_comparisons) + ylab('Shannon diversity') + rremove('legend') + xlab('')
+
+```
+
+```{r}
+ 
+ initial_grid <- plot_grid(palphaclusterchao,palphaclustershannon,
+          labels=c('(A)','(B)'),ncol=2)
+ 
+svg(filename = 'alphaibscluster.svg',width = 10, height =5)
+ ggdraw(initial_grid) +
+   draw_plot(initial_grid)
+ dev.off()
+ 
+```
+
+
+```{r}
+
+  initial_grid <- plot_grid(pbetacluster,palphaclusterchao,palphaclustershannon,
+                          labels=c('(B)','(C)','(D)'),ncol=3)
+ 
+cluster_grid <- plot_grid(NULL,pibscluster,NULL,ncol=3,labels=c('','(A)',''), rel_widths = c(0.2,1, 0.2))
+
+  nested_grid <- plot_grid(cluster_grid,initial_grid,
+          labels=c('',''),ncol=1)
+
+ 
+svg(filename = 'diversityibscluster.svg',width = 12, height =8)
+ ggdraw(nested_grid) +
+   draw_plot(nested_grid)
+ dev.off()
+ 
+ 
+```
+
+```{r}
+
+  initial_grid <- plot_grid(palphaclusterchao,palphaclustershannon,
+                          labels=c('(B)','(C)'),ncol=2)
+
+cluster_grid <- plot_grid(NULL,pibscluster,NULL,ncol=3,labels=c('','(A)',''), rel_widths = c(0.1,1, 0.05),hjust = 1)
+
+  nested_grid <- plot_grid(cluster_grid,initial_grid,
+          labels=c('',''),ncol=1,hjust = c(1,1))
+
+ 
+svg(filename = 'diversityibscluster_3panels.svg',width =8, height =8)
+ ggdraw(nested_grid) +
+   draw_plot(nested_grid)
+ dev.off()
+ 
+ 
+```
+
+```{r}
+
+  initial_grid <- plot_grid(pbetacluster,
+                          labels=c(''),ncol=1)
+ 
+ 
+svg(filename = 'diversityibscluster_supplementary.svg',width =8, height =6)
+ ggdraw(initial_grid) +
+   draw_plot(initial_grid)
+ dev.off()
+ 
+ 
+```
+
+
+## PCOA with two clusters in perspective of control samples
+```{r}
+dis<-dist(as.matrix(ps2@otu_table),method='euclidean')
+# equivalent to Aitchinson distance: Euclidean on CLR profiles
+
+```
+
+### using paper visuals with controls as a single group
+```{r}
+#paper ready
+mod<-betadisper(dis,ifelse(ps2@sam_data$group == 'Case',yes=ps2@sam_data$cluster,no='Control'))
+
+df.pcoa = data.frame(x=mod$vectors[,1],y=mod$vectors[,2],group=mod$group)
+centroids = data.frame(x=mod$centroids[,1],y=mod$centroids[,2],group = factor(rownames(mod$centroids)))
+ 
+gg <- merge(df.pcoa,centroids, by ='group', suffixes = c('','.centroid')) 
+
+gg$group = factor(gsub(pattern = 'IBS',replacement = 'cl',x=gg$group))
+#gg$group = factor(gg$group,labels=c('IBSP','IBSH','Control'))
+
+centroids$group = factor(gsub(pattern = 'IBS',replacement = 'cl',x=centroids$group))
+#centroids$group = factor(centroids$group,labels=c('IBSP','IBSH','Control'))
+pibscluster_ctrl <- ggplot(gg) +
+  geom_point(aes(x=x,y=y,color=group),size=1) + scale_color_manual(values = c('firebrick2','dodgerblue','grey70')) +
+  geom_point(data=centroids,aes(x=x,y=y,color=group),size=3)+
+  geom_segment(aes(x=x.centroid, y =y.centroid, xend=x,yend=y,color=group)) +
+  xlab(paste('PCoA1 (',100*round(mod$eig[1] / sum(mod$eig),2),'%)',sep='')) +
+  ylab(paste('PCoA2 (',100*round(mod$eig[2] / sum(mod$eig),2),'%)',sep='')) + theme_bw() + guides(col=guide_legend(nrow=3)) + labs(color='')
+
+```
+
+```{r}
+
+  initial_grid <- plot_grid(p.sordelli,p.bsteco,
+                          labels=c('(B)','(C)'),ncol=2)
+
+cluster_grid <- plot_grid(NULL,pibscluster_ctrl,NULL,ncol=3,labels=c('','(A)',''), rel_widths = c(0.1,1, 0.05),hjust = 1)
+
+  nested_grid <- plot_grid(cluster_grid,initial_grid,
+          labels=c('',''),ncol=1,hjust = c(1,1))
+
+ 
+svg(filename = 'diversityibscluster_3panels_withcontrol_and_species.svg',width =8, height =8)
+ ggdraw(nested_grid) +
+   draw_plot(nested_grid)
+ dev.off()
+ 
+ 
+```
+
+### try one version that keeps alpha diversity and add bugs
+```{r}
+
+  initial_grid <- plot_grid(palphaclusterchao,palphaclustershannon,p.sordelli,p.bsteco,
+                          labels=c('(B)','(C)','(D)','(E)'),ncol=2)
+
+cluster_grid <- plot_grid(NULL,pibscluster_ctrl,NULL,ncol=3,labels=c('','(A)',''), rel_widths = c(0.1,1, 0.05),hjust = 1)
+
+  nested_grid <- plot_grid(cluster_grid,initial_grid,
+          labels=c('',''),ncol=1,hjust = c(1,1))
+
+ 
+svg(filename = 'diversityibscluster_3panels_with_alpha_control_and_species.svg',width =8, height =13)
+ ggdraw(nested_grid) +
+   draw_plot(nested_grid)
+ dev.off()
+ 
+ 
+```
+
+version without beta/cluster
+```{r}
+
+  initial_grid <- plot_grid(palphaclusterchao,palphaclustershannon,p.sordelli,p.bsteco,
+                          labels=c('(A)','(B)','(C)','(D)'),ncol=2)
+
+svg(filename = 'ibscluster_with_alpha_control_and_species.svg',width =12, height =10)
+ ggdraw(initial_grid) +
+   draw_plot(initial_grid)
+ dev.off()
+ 
+ 
+```
+
+
+## Beta-diversity analysis using pairs within each cluster
+
+```{r}
+labels = sub.metadata$group
+
+dis = as.matrix(dis)
+intra.IBS1 = NULL
+intra.IBS2 = NULL
+intra = NULL
+inter = NULL
+within.cases = NULL
+within.IBS1.cases = NULL
+within.IBS1.ctrls = NULL
+within.IBS2.cases = NULL
+within.IBS2.ctrls = NULL
+within.ctrls = NULL
+for(p in unique(ps2@sam_data$pair)){
+  #IBS1 case
+  if(any(labels[which(ps2@sam_data$pair==p)] == 'IBS1')){
+    #one pair IBS1
+    intra.IBS1 = c(intra.IBS1,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & labels == 'Control')],ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & labels == 'IBS1')]])
+    # all other cases in IBS1
+    within.IBS1.cases = c(within.IBS1.cases,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & labels == 'IBS1')],ps2@sam_data$sangerID[which(ps2@sam_data$pair!=p & labels == 'IBS1')]])
+    # all other controls in IBS1
+    within.IBS1.ctrls = c(within.IBS1.ctrls,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & labels == 'Control')],ps2@sam_data$sangerID[which(ps2@sam_data$pair!=p & labels == 'Control')]])
+    
+    
+  }else{#IBS2 case
+    intra.IBS2 = c(intra.IBS2,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & labels == 'Control')],ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & labels == 'IBS2')]])
+        # all other cases in IBS2
+    within.IBS2.cases = c(within.IBS2.cases,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & labels == 'IBS2')],ps2@sam_data$sangerID[which(ps2@sam_data$pair!=p & labels == 'IBS2')]])
+    # all other controls in IBS2
+    within.IBS2.ctrls = c(within.IBS2.ctrls,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & labels == 'Control')],ps2@sam_data$sangerID[which(ps2@sam_data$pair!=p & labels == 'Control')]])
+  }
+  # all pairs
+  intra = c(intra,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & labels == 'Control')],ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & labels %in% c('IBS1','IBS2'))]])
+  # inter group
+  inter = c(inter,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & labels == 'Control')],ps2@sam_data$sangerID[which(ps2@sam_data$pair!=p & labels %in% c('IBS1','IBS2'))]])
+  # get all other cases
+  within.cases = c(within.cases,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & labels %in% c('IBS1','IBS2'))],ps2@sam_data$sangerID[which(ps2@sam_data$pair!=p & labels %in% c('IBS1','IBS2'))]])
+  # get all other controls
+    within.ctrls = c(within.ctrls,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & labels == 'Control')],ps2@sam_data$sangerID[which(ps2@sam_data$pair!=p & labels == 'Control')]])
+}
+#intra.IBS1: refers to distance between one control and its paired case (in cluster 1 only)
+# IBS1 pairs are closer together as the cases look like controls
+#intra.IBS2: refers to distance between one control and its paired case (in cluster 2 only)
+# IBS2 pairs contain 'actaul' cases and are less similar
+# Significant difference in the IBS1/IBS2 pairs comparison (p=0.016)
+#inter: refers to distance between one control and all cases that are not households
+#intra: refers to distance between one control and its paired case (both clusters together)
+
+
+
+# Fig 1: cluster 2 patients are further from their paired households compared to cluster 1 patients
+
+df = data.frame('dist' = c(intra.IBS1,intra.IBS2,intra),
+                'group' = c(rep('intra.IBS1',length(intra.IBS1)),rep('intra.IBS2',length(intra.IBS2)),rep('intra.both',length(intra))))
+
+
+p <- ggboxplot(df, x = "group", y = "dist",
+                color = "group", palette =mypalette,
+                add = "jitter")
+p + stat_compare_means(comparisons = list(c('intra.IBS1','intra.IBS2'),
+                                          c('intra.IBS1','intra.both'),c('intra.IBS2','intra.both')))    + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ylab('Aitchison distance')
+
+
+
+# Fig2: overall paired data are closer together than random pairing (inter)
+# This effect comes mainly from cluster 1 patients
+df = data.frame('dist' = c(intra.IBS1,intra.IBS2,intra,inter),
+                'group' = c(rep('intra.IBS1',length(intra.IBS1)),rep('intra.IBS2',length(intra.IBS2)),rep('intra.both',length(intra)),rep('random',length(inter))))
+
+
+p <- ggboxplot(df, x = "group", y = "dist",
+                color = "group", palette =mypalette,
+                add = "jitter")
+p + stat_compare_means(comparisons = list(c('intra.both','random'),
+                                          c('intra.IBS1','random'),c('intra.IBS2','random')))    + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ylab('Aitchison distance')
+
+# Fig3: cases within each cluster compared to all cases --> clustering effect
+# Each cluster has a stronger proximity: sanity check that clustering is doing what expected
+df = data.frame('dist' = c(within.IBS1.cases,within.IBS2.cases,within.cases),
+                'group' = c(rep('IBS1.cases',length(within.IBS1.cases)),rep('IBS2.cases',length(within.IBS2.cases)),rep('all.cases',length(within.cases))))
+
+
+p <- ggboxplot(df, x = "group", y = "dist",
+                color = "group", palette =mypalette,
+                add = "jitter")
+p + stat_compare_means(comparisons = list(c('IBS1.cases','IBS2.cases'),
+                                          c('IBS1.cases','all.cases'),c('IBS2.cases','all.cases')))    + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ylab('Aitchison distance')
+
+# Fig 4: controls in each cluster vs all combined
+# Not sure how to interpret this...
+df = data.frame('dist' = c(within.IBS1.ctrls,within.IBS2.ctrls,within.ctrls),
+                'group' = c(rep('IBS1.ctrls',length(within.IBS1.ctrls)),rep('IBS2.ctrls',length(within.IBS2.ctrls)),rep('all.ctrls',length(within.ctrls))))
+
+
+p <- ggboxplot(df, x = "group", y = "dist",
+                color = "group", palette =mypalette,
+                add = "jitter")
+p + stat_compare_means(comparisons = list(c('IBS1.ctrls','IBS2.ctrls'),
+                                          c('IBS1.ctrls','all.ctrls'),c('IBS2.ctrls','all.ctrls')))    + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ylab('Aitchison distance')
+
+```
+
+
+
+# Association with functions
+```{r}
+functions <- read.csv('data/humann3_pathabundance_all_except_timepoint_C.csv', check.names=FALSE)
+functions[1:5,1:5]
+```
+
+```{r}
+sub.metadata = ps3@sam_data[,c('sangerID','pair','group','time','cluster')]
+sub.metadata = cbind(sub.metadata,paste(sub.metadata$cluster,sub.metadata$time,sep='-'))
+colnames(sub.metadata)[6] = 'ClusterxTime'
+colnames(sub.metadata)[1] = 'Sample_ID'
+sub.metadata = cbind(sub.metadata,paste(sub.metadata$group,sub.metadata$cluster,sub.metadata$time,sep='-'))
+colnames(sub.metadata)[7] = 'GroupxClusterxTime'
+sub.metadata = cbind(sub.metadata,paste(sub.metadata$group,sub.metadata$cluster,sep='-'))
+colnames(sub.metadata)[8] = 'GroupxCluster'
+sub.metadata = cbind(sub.metadata,paste(sub.metadata$group,sub.metadata$time,sep='-'))
+colnames(sub.metadata)[9] = 'GroupxTime'
+idx = which(is.na(sub.metadata$cluster))
+if(length(idx) >0) sub.metadata = sub.metadata[-idx,]
+
+relab = data.frame(ps3@otu_table)
+relab[,1] = row.names(relab)
+colnames(relab)[1] = 'Sample_ID'
+relab = relab[rownames(sub.metadata),]
+row.names(relab) = NULL
+
+
+sub.metadata.ab = sub.metadata
+relab.ab = relab
+
+```
+
+
+```{r}
+#sub.metadata.ab
+#relab.ab
+vitamins = c('MET-SAM','PWY-6151','COA-PWY:','PWY-7357','PYRIDNUCSAL',
+             'COBALSYN','THISYNARA',
+             'PWY-6892','1CMET2','PANTO-PWY','PANTOSYN','PWY-3841')#,'COA-PWY-1:','PWY-6891','PWY-4041'
+
+precursors = c('NONOXIPENT-PWY','GLYCOLYSIS: glycolysis','PWY-5913','PWY-7117','METH-ACETATE')#,'ANAGLYCOLYSIS-PWY','PWY-1042','PWY-5484','PWY-241','PWY-7115','PWY66-400'
+
+others = c('PWY-5188','PWY-5100','PWY-7111','PWY-5676')
+
+carbohydrate.metabolism = c('PWY-622','GLYCOCAT-PWY','P124-PWY','GLUCOSE1PMETAB','GLYCOGENSYNTH-PWY','PWY-2723','PWY-7328','PWY66-422','LACTOSECAT-PWY','PWY-6527','PWY-5384','PWY-6317','PWY-6737','GLUCONEO-PWY','UDPNAGSYN','OANTIGEN')#,'CALVIN'
+
+amino.acid.metabolism =c('P4-PWY',
+                        'METSYN-PWY','PWY-5347','PWY0-1061','DAPLYSINESYN-PWY','HOMOSER-METSYN','PWY0-781','TRPSYN-PWY','PWY-6936','PWY-4981','ILEUSYN-PWY','VALSYN-PWY','ARGSYN-PWY'
+,'COMPLETE-ARO'
+,'SER-GLYSYN','PWY-3001','THRESYN','HISTSYN','GLUTORN')#,'ARGSYNBSUB-PWY','HSERMETANA','PWY-2942','PWY-5097','PWY-7400','PWY-5103','PWY-724:','BRANCHED-CHAIN'
+
+nucleotide.metabolism = c('PWY0-1296','SALVADEHYPOX','PWY-6606','P164','PWY-7196','PWY-6277','PWY-5686','PWY-7221','PWY-6121','PWY-7229','PWY-7219')#'PWY-6353','PWY-6122','PWY-6608','PWY-6126'
+
+
+functions.of.interest = c(amino.acid.metabolism,carbohydrate.metabolism,nucleotide.metabolism,vitamins,precursors)
+trevor.palette = c('blue','darkgreen','darkred','darkviolet','gold3')
+ 
+dim(functions[1:5,grep(pattern=paste0(carbohydrate.metabolism,collapse='|'),colnames(functions))])
+length(carbohydrate.metabolism)
+dim(functions[1:5,grep(pattern=paste0(amino.acid.metabolism,collapse='|'),colnames(functions))])
+length(amino.acid.metabolism)
+dim(functions[1:5,grep(pattern=paste0(nucleotide.metabolism,collapse='|'),colnames(functions))])
+length(nucleotide.metabolism)
+dim(functions[1:5,grep(pattern=paste0(vitamins,collapse='|'),colnames(functions))])
+length(vitamins)
+dim(functions[1:5,grep(pattern=paste0(precursors,collapse='|'),colnames(functions))])
+length(precursors)
+```
+
+
+### Timepoint A only:
+```{r}
+idx = which(sub.metadata.ab$time == 'A' & sub.metadata.ab$group == 'Case')
+samples = as.character(sub.metadata.ab$Sample_ID[idx])
+head(samples)
+length(samples)
+```
+
+```{r}
+taxo = relab.ab[which(relab.ab$Sample_ID %in% samples),]
+#species.of.interest = c('Bacteroides.stercorirosoris','Parabacteroides.gordonii','Clostridioides.difficile','Streptococcus.parasanguinis','Fusicatenibacter.saccharivorans','Alistipes.obesi','Alistipes.shahii','Alistipes.timonensis','Bacteroides.cellulosilyticus','Parabacteroides.goldsteinii','Clostridioides.difficile_A','Streptococcus.timonensis','Sutterella.wadsworthensis_A','Barnesiella.intestinihominis','Streptococcus.mutans','Paeniclostridium.sordellii','Faecalicatena.gnavus','Enterococcus.faecalis','Clostridium_P.perfringens','Clostridium_M.clostridioforme','Bifidobacterium.infantis')
+
+species.of.interest = rev(c('Bacteroides.stercorirosoris','Bacteroides.cellulosilyticus','Parabacteroides.gordonii','Parabacteroides.goldsteinii','Alistipes.obesi','Alistipes.shahii','Alistipes.timonensis','Barnesiella.intestinihominis','Streptococcus.parasanguinis','Streptococcus.timonensis','Fusicatenibacter.saccharivorans','Faecalicatena.gnavus','Paeniclostridium.sordellii','Clostridium_P.perfringens','Clostridium_M.clostridioforme','Clostridioides.difficile'))#,'Enterococcus.faecalis','Streptococcus.mutans','Clostridioides.difficile_A'
+
+taxo = taxo[,species.of.interest]
+length(species.of.interest)
+dim(taxo)
+```
+
+```{r}
+colnames(functions)[1] = 'Sample_ID'
+sub.functions = functions[which(functions$Sample_ID %in% samples),grep(pattern=paste0(functions.of.interest,collapse='|'),colnames(functions))]
+
+dim(sub.functions)
+rownames(sub.functions) = samples
+```
+
+### Overall interaction
+```{r,warning=FALSE}
+COR = matrix(0,nrow=length(species.of.interest),ncol=length(functions.of.interest))
+for(i in 1:length(species.of.interest)){
+  for(j in 1:length(functions.of.interest)){
+    COR[i,j] = cor.test(taxo[,i],sub.functions[,j],method = 'spearman')$estimate
+  }
+}
+
+rownames(COR) = colnames(taxo)
+#colnames(COR) = colnames(sub.functions)
+colnames(COR) = gsub(colnames(sub.functions),pattern = ':.*',replacement = '')
+```
+
+```{r}
+sub.COR = COR
+colnames(sub.COR) = c('formyl-tetrahydrofolate biosynthesis','arginine biosynthesis','coenzyme A biosynthesis','adenosylcobalamin salvage','aromatic amino acid biosynthesis','lysine biosynthesis','gluconeogenesis','glucose  degradation','ornithine biosynthesis','glycogen degradation','glycogen biosynthesis','glycolysis','histidine biosynthesis','methionine biosynthesis','isoleucine biosynthesis','lactose and galactose degradation','adenosyl methionine','methanogenesis from acetate','homoserine and methionine biosynthesis','pentose phosphate','antigen building blocks biosynthesis','Bifidobacterium shunt','purine nucleobases degradation','lysine, threonine, methionine biosynthesis','phosphopantothenate biosynthesis','pantothenate and coenzymeA biosynthesis','trehalose degradation','isoleucine biosynthesis','folate transformations','proline biosynthesis','methionine biosynthesis','sucrose degradation','UMP biosynthesis','TCA cycle','aminoimidazole biosynthesis','adenosyl methionine cycle','starch biosynthesis','aminoimidazole biosynthesis','galactose degradation','stachyose degradation','guanosine nucleotides degradation','starch degradation','thiazole biosynthesis','seleno amino acid biosynthesis','C4 photosynthetic carbon assimilation','pyrimidine ribonucleosides salvage','adenosine de novo biosynthesis','guanosine de novo biosynthesis','adenosine de novo biosynthesis','glucose derived antigen biosynthesis','thiamin formation','alanine biosynthesis','purine ribonucleosides degradation','aspartate superpathway','D galactose degradation','NAD salvage','adenosine nucleotides degradation','serine and glycine biosynthesis','thiamin diphosphate biosynthesis','threonine biosynthesis','tryptophan biosynthesis','UDP glucosamine biosynthesis','valine biosynthesis')
+
+idx = which(duplicated(colnames(sub.COR)))
+idx = c(idx,c(46,56))
+sub.COR = sub.COR[,-idx]
+
+#create a mock vector of values
+y.val = rep(1:nrow(sub.COR),each=ncol(sub.COR))
+x.val = rep(1:ncol(sub.COR),times=nrow(sub.COR))
+
+cor.vec= as.vector(t(sub.COR))
+
+svg(filename='heatmap_V3.svg', width=14, height=9)
+par(mar=c(1, 25, 8,3) + 0.1) # used to be 16 on the 4th value if legend is on the right
+
+plot(x.val,y.val,cex=sqrt(ecdf(abs(cor.vec))(abs(cor.vec))),col='white',pch=16,xaxt="n",yaxt="n", lty=3, xlab="", ylab="")
+abline(h=unique(y.val),col='grey90',lty=2)
+abline(v=unique(x.val),col='grey90',lty=2)
+#points(x.val,y.val,cex=2*ecdf(abs(cor.vec))(abs(cor.vec)),col=palette.redblue[ceiling(10*ecdf(cor.vec)(cor.vec))],pch=16)
+points(x.val,y.val,cex=sqrt(ecdf(abs(cor.vec))(abs(cor.vec))),col=palette.redblue[ceiling(10*ecdf(cor.vec)(cor.vec))],pch=16)
+axis(2, at=1:nrow(sub.COR),labels=FALSE, col.axis="black", las=2)
+
+for(i in 1:nrow(sub.COR)){
+  text(x=-3.5, y = i, labels = substitute(italic(x),list(x=rownames(sub.COR)[i])),xpd = #
+       TRUE,col=ifelse(c(rep('Firmicutes',8),rep('Bacteroidetes',8)) == 'Bacteroidetes',no='steelblue2',yes='springgreen2')[i],adj=1,cex=0.9)
+}
+
+
+axis(3, at=1:ncol(sub.COR),labels=FALSE,
+  col.axis="black",tick = -0.01)
+text(x=1:ncol(sub.COR), y = nrow(sub.COR)+1, labels = colnames(sub.COR), srt = 45, adj=0, xpd = TRUE,cex=0.5,col=c(rep(trevor.palette[2],length(amino.acid.metabolism)),rep(trevor.palette[1],length(carbohydrate.metabolism)),rep(trevor.palette[3],length(nucleotide.metabolism)),rep(trevor.palette[5],length(vitamins)),rep(trevor.palette[4],length(precursors)))[-idx])
+
+legend(x= -37, y = 8,title = 'Phylum', legend=c("Bacteroidetes","Firmicutes"), col=c('springgreen2','steelblue2'),pch=15, xpd=TRUE,box.lty=0) #x position used to be ncol(COR)+3
+
+#save some room for the piechart
+
+legend(x= -37, y = 12,title = 'Functional category' , legend=c('Amino Acid Biosynthesis(25%)','Carbohydrate metabolism(16%)','Nucleotide Degradation(14%)','Vitamin Biosynthesis(14%)','Precursor Metabolites(10%)'), col=trevor.palette[c(2,1,3,5,4)],pch=15, xpd=TRUE,box.lty=0)
+
+
+#add correlation legend
+legend(x= -37, y = 6,title = 'Spearman Correlation',legend=as.character(round(c(-1*rev(quantile(abs(cor.vec))),0,quantile(abs(cor.vec))),3)) ,pch=16, xpd=TRUE,box.lty=0,col=palette.redblue[],pt.cex=c(rev(quantile(sqrt(ecdf(abs(cor.vec))(abs(cor.vec))))),0,quantile(sqrt(ecdf(abs(cor.vec))(abs(cor.vec))))))#
+
+
+graphics.off()
+```
+
+
+# Diet intervention
+
+## IBS SCORE by STEPHEN MOSS
+```{r}
+scores = readxl::read_xlsx('data/scores_stephen_censored.xlsx') #use the 'censored' version
+
+#A figure
+scores$`total score A S` = scores$`Total score A S cl1`
+scores$`total score A S`[which(is.na( scores$`Total score A S cl1`))] =  scores$`Total score A S cl2`[which(is.na( scores$`Total score A S cl1`))]
+
+scores$`delta A B` = scores$`delta A - B score cl 1`
+scores$`delta A B`[which(is.na(scores$`delta A - B score cl 1`))] =  scores$`delta A - B score cl 2`[which(is.na( scores$`delta A - B score cl 1`))]
+
+scores.cases = scores[which(scores$`S/HC` == 'S'),]
+#cases only three time points (36, 36 and 16)
+df = data.frame(indiv=rep(scores.cases$`Study no`,3),
+                score = c(scores.cases$`total score A S`,
+                scores.cases$`total score B S`,
+                scores.cases$`total score C S`),
+                timepoint=c(rep('Pre Diet',nrow(scores.cases)),rep('On Diet',nrow(scores.cases)),rep('Post Diet',nrow(scores.cases))))
+
+df$timepoint = factor(df$timepoint,levels=c('Pre Diet','On Diet', 'Post Diet'))
+df$timepoint = factor(df$timepoint,labels=c('Pre Diet\n(n=36)','On Diet\n(n=36)', 'Post Diet\n(n=16)'))
+ table(df$timepoint,is.na(df$score))
+
+ 
+ 
+p <- ggbarplot(df, x = "timepoint", y = "score",
+                add = c("mean_se", "jitter"), error.plot = "upper_errorbar",fill = "steelblue")
+pibsa <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('On Diet\n(n=36)','Post Diet\n(n=16)'),c('Pre Diet\n(n=36)','On Diet\n(n=36)')
+                                          )) + ylab('IBSSSS total score') + rremove('legend') + xlab('')
+pibsa
+
+
+#B figure
+df = data.frame(indiv=rep(scores.cases$`Study no`,2),
+                cluster = factor(rep(paste0('cl',scores.cases$Cluster),2)),
+                score = c(scores.cases$`total score A S`,
+                scores.cases$`total score B S`),
+                timepoint=c(rep('Pre Diet',nrow(scores.cases)),rep('On Diet',nrow(scores.cases))))
+
+df$timepoint = factor(df$timepoint,levels=c('Pre Diet','On Diet'))
+df$cluster = factor(df$cluster,labels=c('IBSP\n(n=16)','IBSH\n(n=20)'))
+ table(df$timepoint,is.na(df$score),df$cluster)
+ 
+p <- ggbarplot(df, x = "cluster", y = "score", color = "timepoint",
+                add = c("mean_se", "jitter"), error.plot = "upper_errorbar",position = position_dodge(0.9), palette = c('firebrick2','darkblue'))#,facet.by = "cluster")#,palette=c('firebrick2','red4','dodgerblue','darkblue'))
+pibsb <- p + stat_compare_means(aes(group = timepoint), label= 'p.signif') + ylab('IBSSSS total score') + xlab('') + theme(legend.title=element_blank())
+pibsb
+
+
+#C figure
+df = data.frame(indiv=scores.cases$`Study no`,
+                cluster = factor(paste0('cl',scores.cases$Cluster)),
+                score = -scores.cases$`delta A B`)
+
+df$cluster = factor(df$cluster,labels=c('IBSP\n(n=16)','IBSH\n(n=20)'))
+ table(df$cluster,is.na(df$score))
+
+
+p <- ggbarplot(df, x = "cluster", y = "score",
+                add = c("mean_se", "jitter"), error.plot = "upper_errorbar",position = position_dodge(0.9),fill = "steelblue")#,facet.by = "cluster")#,palette=c('firebrick2','red4','dodgerblue','darkblue'))
+pibsc <- p + stat_compare_means(comparisons = list(c('IBSP\n(n=16)','IBSH\n(n=20)')), label= 'p.signif') + ylab('decrease in IBSSSS total score\n between pre-diet and on diet time points') + xlab('') + #ylab('decrease in IBS-SSS total score\n between time points A and B') 
+  theme(legend.title=element_blank()) + geom_hline(yintercept=0)
+pibsc
+```
+
+```{r}
+ initial_grid <- plot_grid(pibsa,pibsb,pibsc,
+          labels=c('(A)','(B)','(C)'),ncol=3)
+ 
+svg(filename = 'ibsscores.svg',width = 10, height =5)
+ ggdraw(initial_grid) +
+   draw_plot(initial_grid)
+ dev.off()
+ 
+```
+
+### result for controls
+```{r,eval=F}
+scores = readxl::read_xlsx('data/scores_stephen_censored.xlsx') #use the 'censored' version
+
+#A figure
+scores$`total score A HC` = scores$`Total score A HC cl1`
+scores$`total score A HC`[which(is.na( scores$`Total score A HC cl1`))] =  scores$`Total score A HC cl2`[which(is.na( scores$`Total score A HC cl1`))]
+
+scores$`delta A B` = scores$`delta A - B score cl 1`
+scores$`delta A B`[which(is.na(scores$`delta A - B score cl 1`))] =  scores$`delta A - B score cl 2`[which(is.na( scores$`delta A - B score cl 1`))]
+
+scores.cases = scores[which(scores$`S/HC` == 'HC'),]
+#cases only three time points (36, 36 and 16)
+df = data.frame(indiv=rep(scores.cases$`Study no`,3),
+                score = c(scores.cases$`total score A S`,
+                scores.cases$`total score B S`,
+                scores.cases$`total score C S`),
+                timepoint=c(rep('Pre Diet',nrow(scores.cases)),rep('On Diet',nrow(scores.cases)),rep('Post Diet',nrow(scores.cases))))
+
+df$timepoint = factor(df$timepoint,levels=c('Pre Diet','On Diet', 'Post Diet'))
+df$timepoint = factor(df$timepoint,labels=c('Pre Diet\n(n=36)','On Diet\n(n=36)', 'Post Diet\n(n=16)'))
+ table(df$timepoint,is.na(df$score))
+
+ 
+ 
+p <- ggbarplot(df, x = "timepoint", y = "score",
+                add = c("mean_se", "jitter"), error.plot = "upper_errorbar",fill = "steelblue")
+pibsa <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('On Diet\n(n=36)','Post Diet\n(n=16)'),c('Pre Diet\n(n=36)','On Diet\n(n=36)')
+                                          )) + ylab('IBS-SSS total score') + rremove('legend') + xlab('')
+pibsa
+
+
+#B figure
+df = data.frame(indiv=rep(scores.cases$`Study no`,2),
+                cluster = factor(rep(paste0('cl',scores.cases$Cluster),2)),
+                score = c(scores.cases$`total score A S`,
+                scores.cases$`total score B S`),
+                timepoint=c(rep('Pre Diet',nrow(scores.cases)),rep('On Diet',nrow(scores.cases))))
+
+df$timepoint = factor(df$timepoint,levels=c('Pre Diet','On Diet'))
+df$cluster = factor(df$cluster,labels=c('cl1\n(n=16)','cl2\n(n=20)'))
+ table(df$timepoint,is.na(df$score),df$cluster)
+ 
+p <- ggbarplot(df, x = "cluster", y = "score", color = "timepoint",
+                add = c("mean_se", "jitter"), error.plot = "upper_errorbar",position = position_dodge(0.9), palette = c('firebrick2','darkblue'))#,facet.by = "cluster")#,palette=c('firebrick2','red4','dodgerblue','darkblue'))
+pibsb <- p + stat_compare_means(aes(group = timepoint), label= 'p.signif') + ylab('IBS-SSS total score') + xlab('') + theme(legend.title=element_blank())
+pibsb
+
+
+#C figure
+df = data.frame(indiv=scores.cases$`Study no`,
+                cluster = factor(paste0('cl',scores.cases$Cluster)),
+                score = -scores.cases$`delta A B`)
+
+df$cluster = factor(df$cluster,labels=c('cl1\n(n=16)','cl2\n(n=20)'))
+ table(df$cluster,is.na(df$score))
+
+
+p <- ggbarplot(df, x = "cluster", y = "score",
+                add = c("mean_se", "jitter"), error.plot = "upper_errorbar",position = position_dodge(0.9),fill = "steelblue")#,facet.by = "cluster")#,palette=c('firebrick2','red4','dodgerblue','darkblue'))
+pibsc <- p + stat_compare_means(comparisons = list(c('cl1\n(n=16)','cl2\n(n=20)')), label= 'p.signif') + ylab('decrease in IBS-SSS total score\n between pre-diet and on diet time points') + xlab('') + #ylab('decrease in IBS-SSS total score\n between time points A and B') 
+  theme(legend.title=element_blank()) + geom_hline(yintercept=0)
+pibsc
+```
+
+
+## Data completeness
+```{r}
+table(metadata$time)
+
+length(which(table(metadata$pair) == 6)) # 21/52 complete pairs
+
+length(which(table(metadata$pair[which(metadata$time == 'A' | metadata$time == 'B' )]) == 4)) # 39 complete pairs with A and B samples
+
+length(which(table(metadata$pair[which(metadata$time == 'A' | metadata$time == 'C' )]) == 4)) # 24 complete pairs with A and C samples
+
+```
+
+## Change from time A to B
+```{r}
+ idx = which(metadata$time == 'A' | metadata$time == 'B') 
+ idx2 = names(which(table(metadata$pair[idx]) == 4))
+ sub.meta = metadata[which(metadata$pair %in% idx2),]
+ sub.tmp = tmp[which(metadata$pair %in% idx2),]
+ sub.tmp = sub.tmp[which(sub.meta$time == 'A' | sub.meta$time == 'B'),] # 120 samples = 4 time 30
+ sub.meta = sub.meta[which(sub.meta$time == 'A' | sub.meta$time == 'B'),] 
+ ps <- phyloseq(sample_data(sub.meta),
+                  otu_table(sub.tmp, taxa_are_rows = FALSE))
+ 
+# Transformation to CoDA
+sum(ps@otu_table == 0)
+100*sum(ps@otu_table == 0)/length(ps@otu_table)
+
+prevalence = 100*apply(ps@otu_table,2,function(x) sum(x>0)/length(x))
+total.read.count = apply(ps@otu_table,2,sum)
+
+## Filter rare taxa -->NONE
+
+#  Define prevalence threshold as 10% of total samples
+prevalenceThreshold = 0.1 * nsamples(ps)
+prevalenceThreshold
+
+# Execute prevalence filter, using `prune_taxa()` function
+keepTaxa = names(prevalence)[(prevalence >= prevalenceThreshold)]
+ps1 = prune_taxa(keepTaxa, ps)
+
+
+## Estimate zeros
+d.czm <- cmultRepl(ps1@otu_table,  label=0, method="CZM")
+d.clr <- t(apply(d.czm, 1, function(x){log(x) - mean(log(x))}))
+ps2 = ps1
+ps2@otu_table = otu_table(d.clr, taxa_are_rows = FALSE)
+
+
+dis<-dist(as.matrix(ps2@otu_table),method='euclidean')
+# equivalent to Aitchinson distance: Eucidean on CLR profiles
+
+mod<-betadisper(dis,paste(ps2@sam_data$group,ps2@sam_data$time,sep='-'))
+
+```
+
+### Intra/Inter-pair variability
+```{r}
+dis = as.matrix(dis)
+intra.A = NULL
+inter.A = NULL
+intra.B = NULL
+inter.B = NULL
+for(p in unique(ps2@sam_data$pair)){
+  intra.A = c(intra.A,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$group == 'Control' & ps2@sam_data$time == 'A')],ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$group == 'Case'& ps2@sam_data$time == 'A')]])
+  
+  inter.A = c(inter.A,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$group == 'Control' & ps2@sam_data$time == 'A')],ps2@sam_data$sangerID[which(ps2@sam_data$pair!=p & ps2@sam_data$group == 'Case' & ps2@sam_data$time == 'A')]])
+  
+    intra.B = c(intra.B,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$group == 'Control' & ps2@sam_data$time == 'B')],ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$group == 'Case'& ps2@sam_data$time == 'B')]])
+  
+  inter.B = c(inter.B,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$group == 'Control' & ps2@sam_data$time == 'B')],ps2@sam_data$sangerID[which(ps2@sam_data$pair!=p & ps2@sam_data$group == 'Case' & ps2@sam_data$time == 'B')]])
+  
+}
+
+df = data.frame('dist' = c(intra.A,inter.A,intra.B,inter.B),
+                'group' = c(rep('intra-T0',length(intra.A)),rep('inter-T0',length(inter.A)),rep('intra-T1',length(intra.B)),rep('inter-T1',length(inter.B))))
+df$group = factor(df$group,levels=c('inter-T0','intra-T0','inter-T1','intra-T1'))
+
+
+p <- ggboxplot(df, x = "group", y = "dist",
+                color = "group", palette =mypalette,
+                add = "jitter")
+p + stat_compare_means(comparisons = list(c('intra-T0','inter-T0'),c('intra-T1','inter-T1'),c('intra-T0','intra-T1'),c('inter-T0','inter-T1')))    + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ylab('Aitchison distance')
+
+
+# Diet do not impact how close pairs are 
+# Diet makes pairs closer to each other compared to the rest of the samples
+# Overall, Samples in T1 are much closely related than at T0
+```
+
+### Patient clusters
+
+```{r}
+
+ps2@sam_data$cluster = cluster.label[match(ps2@sam_data$sangerID, names(cluster.label))]
+for(patient in unique(ps2@sam_data$patient)){
+  if(any(!is.na(ps2@sam_data$cluster[which(ps2@sam_data$patient == patient)]))) ps2@sam_data$cluster[which(ps2@sam_data$patient == patient)][is.na(ps2@sam_data$cluster[which(ps2@sam_data$patient == patient)])] = ps2@sam_data$cluster[which(ps2@sam_data$patient == patient)][!is.na(ps2@sam_data$cluster[which(ps2@sam_data$patient == patient)])]
+}
+
+table(ps2@sam_data$cluster)/2 # 22 IBS1 and 17 IBS2
+
+idx = which(is.na(ps2@sam_data$cluster))
+idx2 = as.character(ps2@sam_data$sangerID[-idx])
+
+ps3 <-  phyloseq(sample_data(ps2@sam_data[-idx,]),
+                 otu_table(ps2@otu_table[idx2,], taxa_are_rows = FALSE))
+
+
+dis <- dist(as.matrix(ps3@otu_table),method='euclidean')
+
+mod<-betadisper(dis,paste(ps3@sam_data$cluster,ps3@sam_data$time,sep='-'))
+
+res <- permutest(mod, pairwise = TRUE, permutations = 10000)
+res
+
+```
+
+
+```{r}
+df.pcoa = data.frame(x=mod$vectors[,1],y=mod$vectors[,2],group=mod$group)
+centroids = data.frame(x=mod$centroids[,1],y=mod$centroids[,2],group = factor(rownames(mod$centroids)))
+ 
+gg <- merge(df.pcoa,centroids, by ='group', suffixes = c('','.centroid')) 
+
+gg$group = factor(gsub(pattern = 'IBS',replacement = 'cl',x=gg$group))
+centroids$group = factor(gsub(pattern = 'IBS',replacement = 'cl',x=centroids$group))
+
+gg$group = factor(gsub(pattern = '-A',replacement = '-Pre Diet',x=gg$group))
+gg$group = factor(gsub(pattern = '-B',replacement = '-On Diet',x=gg$group))
+centroids$group = factor(gsub(pattern = '-A',replacement = '-Pre Diet',x=centroids$group))
+centroids$group = factor(gsub(pattern = '-B',replacement = '-On Diet',x=centroids$group))
+
+ppcoadiet <- ggplot(gg) +
+  geom_point(aes(x=x,y=y,color=group),size=1,alpha=0.4) + scale_color_manual(values = c('red4','firebrick2','darkblue','dodgerblue')) +
+  geom_point(data=centroids,aes(x=x,y=y,color=group),size=4)+
+  geom_segment(aes(x=x.centroid, y =y.centroid, xend=x,yend=y,color=group),alpha=0.2) +
+  xlab(paste('PCoA1 (',100*round(mod$eig[1] / sum(mod$eig),2),'%)',sep='')) +
+  ylab(paste('PCoA2 (',100*round(mod$eig[2] / sum(mod$eig),2),'%)',sep='')) + theme_bw() + guides(col=guide_legend(nrow=2)) + labs(color='') + theme(legend.position = c(0.8,0.87))
+
+ppcoadiet
+```
+
+
+
+## Beta-diversity analysis using pairs within each cluster
+
+
+between cluster dissimilarity for cases only at 2 different time points
+```{r}
+dis <- dist(as.matrix(ps2@otu_table),method='euclidean')
+
+dis = as.matrix(dis)
+intra.cl1A = NULL
+intra.cl1B = NULL
+intra.cl2A = NULL
+intra.cl2B = NULL
+inter.A = NULL
+inter.B = NULL
+inter.cl1 = NULL
+inter.cl2 = NULL
+
+for(p in unique(ps2@sam_data$pair)){
+  #IBS1 case
+  if(any(ps2@sam_data$cluster[which(ps2@sam_data$pair==p)] == 'IBS1',na.rm = TRUE)){
+    #this case vs all ibs2 - timepoint A
+    inter.A = c(inter.A,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'A' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair != p & ps2@sam_data$time == 'A' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS2')]])
+
+     #this case vs all ibs2- timepoint B
+    inter.B = c(inter.B,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair != p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS2')]])
+
+        #this case vs all ibs1 - timepoint A
+    intra.cl1A = c(intra.cl1A,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'A' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair != p & ps2@sam_data$time == 'A' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS1')]])
+
+     #this case vs all ibs1- timepoint B
+    intra.cl1B = c(intra.cl1B,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair != p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS1')]])
+    # this case acros time points
+    inter.cl1 = c(inter.cl1,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'A' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair == p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS1')]])
+    
+    
+  }else{#IBS2 case
+    #this case vs all ibs1 - timepoint A
+    inter.A = c(inter.A,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'A' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair != p & ps2@sam_data$time == 'A' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS1')]])
+
+     #this case vs all ibs1- timepoint B
+    inter.B = c(inter.B,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair != p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS1')]])
+
+        #this case vs all ibs2 - timepoint A
+    intra.cl2A = c(intra.cl2A,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'A' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair != p & ps2@sam_data$time == 'A' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS2')]])
+
+     #this case vs all ibs2- timepoint B
+    intra.cl2B = c(intra.cl2B,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair != p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS2')]])
+        # this case acros time points
+    inter.cl2 = c(inter.cl2,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'A' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair == p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS2')]])
+  }
+}
+
+
+df = data.frame('dist' = c(inter.A,inter.B, inter.cl1, inter.cl2),
+                'group' = c(rep('between clusters\nPre-Diet',length(inter.A)),rep('between clusters\nOn Diet',length(inter.B)),rep('within IBSP\ntwo timepoints',length(inter.cl1)),rep('within IBSH\ntwo timepoints',length(inter.cl2)) ))
+
+df$group = factor(df$group, levels = c('between clusters\nPre-Diet','between clusters\nOn Diet','within IBSP\ntwo timepoints','within IBSH\ntwo timepoints'))
+
+p <- ggboxplot(df, x = "group", y = "dist",
+                color = "group", palette =c('mediumorchid1','purple4','red','blue'),
+                add = "jitter")
+ptimepointbeta <- p + stat_compare_means(method.args=list(alternative='greater'),comparisons = list(c('between clusters\nPre-Diet','between clusters\nOn Diet'),
+                                        c('within IBSP\ntwo timepoints','within IBSH\ntwo timepoints')),label = "p.signif") + ylab('Aitchison distance') + theme(legend.title=element_blank()) + theme(legend.position = "none") + xlab('')
+
+ptimepointbeta
+
+```
+
+```{r}
+ 
+ initial_grid <- plot_grid(ptimepointbeta,
+          labels=c(''),ncol=1)
+ 
+svg(filename = 'dietimpact_supplementary.svg',width = 10, height =5)
+ ggdraw(initial_grid) +
+   draw_plot(initial_grid)
+ dev.off()
+ 
+```
+
+### Maaslin2
+```{r, message=FALSE, warning=FALSE, results='hide'}
+dir.create('MAaSLIN2_Coda_2clusters_A_B')
+sub.metadata = ps3@sam_data[,c('sangerID','pair','time','cluster')]
+sub.metadata = cbind(sub.metadata,paste(sub.metadata$cluster,sub.metadata$time,sep='-'))
+colnames(sub.metadata)[5] = 'ClusterxTime'
+colnames(sub.metadata)[1] = 'Sample_ID'
+idx = which(is.na(sub.metadata$cluster))
+if(length(idx) >0) sub.metadata = sub.metadata[-idx,]
+
+write.table(sub.metadata,file='MAaSLIN2_Coda_2clusters_A_B/metadata_2clusters.txt',sep = '\t',quote=F,col.names = T,row.names = F)
+
+relab = data.frame(ps3@otu_table)
+relab[,1] = row.names(relab)
+colnames(relab)[1] = 'Sample_ID'
+relab = relab[rownames(sub.metadata),]
+row.names(relab) = NULL
+
+write.table(relab,file='MAaSLIN2_Coda_2clusters_A_B/abundances_norm.txt',sep = '\t',quote=F,col.names = T,row.names = F)
+
+```
+
+```{r eval=T}
+fit_data <- Maaslin2(input_data = 'MAaSLIN2_Coda_2clusters_A_B/abundances_norm.txt',input_metadata = 'MAaSLIN2_Coda_2clusters_A_B/metadata_2clusters.txt',
+                     output='MAaSLIN2_Coda_2clusters_A_B',
+                     random_effects = 'pair',
+                     fixed_effects = c('ClusterxTime'),transform = 'NONE',normalization = 'NONE',analysis_method='LM',standardize=FALSE,max_significance = 0.1,plot_heatmap = FALSE,min_abundance = 0.2) #'time','cluster',
+
+```
+
+
+```{r}
+#create abundance plot from Maaslin results
+species='Bacteroides.stercorirosoris'
+
+df = data.frame(abundance = relab[,species],
+                group = sub.metadata$ClusterxTime
+)
+
+df$group = factor(gsub(df$group,pattern = 'IBS',replacement = 'cl'))
+df$group = factor(gsub(df$group,pattern = 'A',replacement = 'Pre-Diet'))
+df$group = factor(gsub(df$group,pattern = 'B',replacement = 'On Diet'))
+#df$group = factor(df$group,levels = c('cl1-Pre-Diet','cl1-On Diet','cl2-Pre-Diet','cl2-On Diet'))
+df$group = factor(df$group,labels = c('IBSP-On Diet','IBSP-Pre-Diet','IBSH-On Diet','IBSH-Pre-Diet'))
+df$group = factor(df$group,levels = c('IBSP-Pre-Diet','IBSP-On Diet','IBSH-Pre-Diet','IBSH-On Diet'))
+p <- ggboxplot(df, x = "group", y = "abundance",
+                color = "group",palette=c('firebrick2','red4','dodgerblue','darkblue'),
+                add = "jitter")
+ p.bsteco.caseonly <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('IBSP-Pre-Diet','IBSP-On Diet'),c('IBSH-Pre-Diet','IBSH-On Diet'),c('IBSP-Pre-Diet','IBSH-Pre-Diet'),c('IBSP-On Diet','IBSH-On Diet'))) + ylab('CLR abundance') + xlab('') + rremove('legend') + ggtitle(species) + font("title", face = "italic") + font("x.text", size = 9)
+p.bsteco.caseonly
+
+#create abundance plot from Maaslin results
+species='Bacteroides.cutis'
+
+df = data.frame(abundance = relab[,species],
+                group = sub.metadata$ClusterxTime
+)
+
+df$group = factor(gsub(df$group,pattern = 'IBS',replacement = 'cl'))
+df$group = factor(gsub(df$group,pattern = 'A',replacement = 'Pre-Diet'))
+df$group = factor(gsub(df$group,pattern = 'B',replacement = 'On Diet'))
+df$group = factor(df$group,labels = c('IBSP-On Diet','IBSP-Pre-Diet','IBSH-On Diet','IBSH-Pre-Diet'))
+df$group = factor(df$group,levels = c('IBSP-Pre-Diet','IBSP-On Diet','IBSH-Pre-Diet','IBSH-On Diet'))
+p <- ggboxplot(df, x = "group", y = "abundance",
+                color = "group",palette=c('firebrick2','red4','dodgerblue','darkblue'),
+                add = "jitter")
+ p.bcutis.caseonly <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('IBSP-Pre-Diet','IBSP-On Diet'),c('IBSH-Pre-Diet','IBSH-On Diet'),c('IBSP-Pre-Diet','IBSH-Pre-Diet'),c('IBSP-On Diet','IBSH-On Diet'))) + ylab('CLR abundance') + xlab('') + rremove('legend') + ggtitle(species) + font("title", face = "italic") + font("x.text", size = 9)
+p.bcutis.caseonly
+
+#create abundance plot from Maaslin results
+species='Clostridioides.difficile'
+
+df = data.frame(abundance = relab[,species],
+                group = sub.metadata$ClusterxTime
+)
+
+df$group = factor(gsub(df$group,pattern = 'IBS',replacement = 'cl'))
+df$group = factor(gsub(df$group,pattern = 'A',replacement = 'Pre-Diet'))
+df$group = factor(gsub(df$group,pattern = 'B',replacement = 'On Diet'))
+df$group = factor(df$group,labels = c('IBSP-On Diet','IBSP-Pre-Diet','IBSH-On Diet','IBSH-Pre-Diet'))
+df$group = factor(df$group,levels = c('IBSP-Pre-Diet','IBSP-On Diet','IBSH-Pre-Diet','IBSH-On Diet'))
+p <- ggboxplot(df, x = "group", y = "abundance",
+                color = "group",palette=c('firebrick2','red4','dodgerblue','darkblue'),
+                add = "jitter")
+ p.cdiff.caseonly <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('IBSP-Pre-Diet','IBSP-On Diet'),c('IBSH-Pre-Diet','IBSH-On Diet'),c('IBSP-Pre-Diet','IBSH-Pre-Diet'),c('IBSP-On Diet','IBSH-On Diet'))) + ylab('CLR abundance') + xlab('') + rremove('legend') + ggtitle(species) + font("title", face = "italic") + font("x.text", size = 9)
+p.cdiff.caseonly
+
+#create abundance plot from Maaslin results
+species='Streptococcus.parasanguinis'
+
+df = data.frame(abundance = relab[,species],
+                group = sub.metadata$ClusterxTime
+)
+
+df$group = factor(gsub(df$group,pattern = 'IBS',replacement = 'cl'))
+df$group = factor(gsub(df$group,pattern = 'A',replacement = 'Pre-Diet'))
+df$group = factor(gsub(df$group,pattern = 'B',replacement = 'On Diet'))
+df$group = factor(df$group,labels = c('IBSP-On Diet','IBSP-Pre-Diet','IBSH-On Diet','IBSH-Pre-Diet'))
+df$group = factor(df$group,levels = c('IBSP-Pre-Diet','IBSP-On Diet','IBSH-Pre-Diet','IBSH-On Diet'))
+p <- ggboxplot(df, x = "group", y = "abundance",
+                color = "group",palette=c('firebrick2','red4','dodgerblue','darkblue'),
+                add = "jitter")
+ p.csordellii.caseonly <- p + stat_compare_means(label= 'p.signif',comparisons =list(c('IBSP-Pre-Diet','IBSP-On Diet'),c('IBSH-Pre-Diet','IBSH-On Diet'),c('IBSP-Pre-Diet','IBSH-Pre-Diet'),c('IBSP-On Diet','IBSH-On Diet'))) + ylab('CLR abundance') + xlab('') + rremove('legend') + ggtitle(species) + font("title", face = "italic") + font("x.text", size = 9)
+p.csordellii.caseonly
+
+```
+
+```{r}
+ 
+ initial_grid <- plot_grid(p.bsteco.caseonly,p.bcutis.caseonly,p.cdiff.caseonly,p.csordellii.caseonly,
+          labels=c('(B)','(C)', '(D)', '(E)'),ncol=2)
+
+ nested_grid <- plot_grid(ppcoadiet,initial_grid,
+          labels=c('(A)',''),ncol=1,rel_heights = c(1,1.5))
+ 
+svg(filename = 'dietimpact.svg',width = 10, height =10)
+ ggdraw(nested_grid) +
+   draw_plot(nested_grid)
+ dev.off()
+ 
+```
+
+### Maaslin2
+```{r, message=FALSE, warning=FALSE, results='hide'}
+
+dir.create('MAaSLIN2_Coda_2clusters_A_B_with_controls')
+#find controls
+idx = which(is.na(ps2@sam_data$cluster))
+for(i in idx){
+  ps2@sam_data$cluster[i] = ps2@sam_data$cluster[which(ps2@sam_data$pair == ps2@sam_data$pair[i] & ps2@sam_data$group == 'Case')[1]]
+}
+
+sub.metadata = ps2@sam_data[,c('sangerID','pair','group','time','cluster')]
+sub.metadata = cbind(sub.metadata,paste(sub.metadata$cluster,sub.metadata$time,sep='-'))
+colnames(sub.metadata)[6] = 'ClusterxTime'
+colnames(sub.metadata)[1] = 'Sample_ID'
+sub.metadata = cbind(sub.metadata,paste(sub.metadata$group,sub.metadata$cluster,sub.metadata$time,sep='-'))
+colnames(sub.metadata)[7] = 'GroupxClusterxTime'
+sub.metadata = cbind(sub.metadata,paste(sub.metadata$group,sub.metadata$cluster,sep='-'))
+colnames(sub.metadata)[8] = 'GroupxCluster'
+sub.metadata = cbind(sub.metadata,paste(sub.metadata$group,sub.metadata$time,sep='-'))
+colnames(sub.metadata)[9] = 'GroupxTime'
+idx = which(is.na(sub.metadata$cluster))
+if(length(idx) >0) sub.metadata = sub.metadata[-idx,]
+write.table(sub.metadata,file='MAaSLIN2_Coda_2clusters_A_B_with_controls/metadata_2clusters.txt',sep = '\t',quote=F,col.names = T,row.names = F)
+
+
+ps3 <-  phyloseq(sample_data(ps2@sam_data),
+                 otu_table(ps2@otu_table, taxa_are_rows = FALSE))
+
+relab = data.frame(ps3@otu_table)
+relab[,1] = row.names(relab)
+colnames(relab)[1] = 'Sample_ID'
+relab = relab[rownames(sub.metadata),]
+row.names(relab) = NULL
+write.table(relab,file='MAaSLIN2_Coda_2clusters_A_B_with_controls/abundances_norm.txt',sep = '\t',quote=F,col.names = T,row.names = F)
+```
+
+
+```{r eval=T}
+
+fit_data <- Maaslin2(input_data = 'MAaSLIN2_Coda_2clusters_A_B_with_controls/abundances_norm.txt',input_metadata = 'MAaSLIN2_Coda_2clusters_A_B_with_controls/metadata_2clusters.txt',
+                     output='MAaSLIN2_Coda_2clusters_A_B_with_controls',
+                     random_effects = 'pair',
+                     fixed_effects = c('group','time','cluster','GroupxClusterxTime','GroupxTime','GroupxCluster','ClusterxTime'),transform = 'NONE',normalization = 'NONE',analysis_method='LM',standardize=FALSE,max_significance = 0.1,plot_heatmap = FALSE,min_abundance = 0.2) 
+
+```
+
+
+```{r}
+#create abundance plot from Maaslin results
+species='Bacteroides.stercorirosoris'
+
+df = data.frame(abundance = relab[,species],
+                group = sub.metadata$time,
+                tag = sub.metadata$GroupxCluster,
+                case = sub.metadata$group,
+                cluster = sub.metadata$cluster,
+                timetag = sub.metadata$ClusterxTime
+)
+
+df$cluster = factor(gsub(df$cluster,pattern = 'IBS',replacement = 'cl'))
+df$group = factor(gsub(df$group,pattern = 'A',replacement = 'Pre-Diet'))
+df$group = factor(gsub(df$group,pattern = 'B',replacement = 'On Diet'))
+df$group = factor(df$group,levels = c('Pre-Diet','On Diet'))
+
+df$tag = factor(gsub(df$tag,pattern = 'IBS',replacement = 'cl'))
+df$tag = factor(df$tag,labels = c('Case-IBSP','Case-IBSH','Control-IBSP','Control-IBSH'))
+df$tag = factor(df$tag,levels = c('Case-IBSP','Control-IBSP','Case-IBSH','Control-IBSH'))
+
+p <- ggboxplot(df, x = "tag", y = "abundance",
+                color = "timetag",palette=c('firebrick2','red4','dodgerblue','darkblue'),shape="case",add='jitter',facet.by = 'group')
+ p.bsteco <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('Case-IBSH','Control-IBSH'),c('Case-IBSP','Control-IBSP'),c('Case-IBSH','Case-IBSP'),c('Control-IBSH','Control-IBSP'))) + ylab('CLR abundance') + xlab('') + rremove('legend') + ggtitle(species) + font("title", face = "italic") + font("x.text", size = 9)
+
+p.bsteco <- ggpar(p.bsteco,xtickslab.rt = 45)
+p.bsteco
+#create abundance plot from Maaslin results
+species='Bacteroides.cutis'
+
+df = data.frame(abundance = relab[,species],
+                group = sub.metadata$time,
+                tag = sub.metadata$GroupxCluster,
+                case = sub.metadata$group,
+                cluster = sub.metadata$cluster,
+                timetag = sub.metadata$ClusterxTime
+)
+
+df$cluster = factor(gsub(df$cluster,pattern = 'IBS',replacement = 'cl'))
+df$group = factor(gsub(df$group,pattern = 'A',replacement = 'Pre-Diet'))
+df$group = factor(gsub(df$group,pattern = 'B',replacement = 'On Diet'))
+df$group = factor(df$group,levels = c('Pre-Diet','On Diet'))
+
+df$tag = factor(gsub(df$tag,pattern = 'IBS',replacement = 'cl'))
+df$tag = factor(df$tag,labels = c('Case-IBSP','Case-IBSH','Control-IBSP','Control-IBSH'))
+df$tag = factor(df$tag,levels = c('Case-IBSP','Control-IBSP','Case-IBSH','Control-IBSH'))
+
+p <- ggboxplot(df, x = "tag", y = "abundance",
+                color = "timetag",palette=c('firebrick2','red4','dodgerblue','darkblue'),shape="case",add='jitter',facet.by = 'group')
+ p.bcutis <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('Case-IBSH','Control-IBSH'),c('Case-IBSP','Control-IBSP'),c('Case-IBSH','Case-IBSP'),c('Control-IBSH','Control-IBSP'))) + ylab('CLR abundance') + xlab('') + rremove('legend') + ggtitle(species) + font("title", face = "italic") + font("x.text", size = 9)
+
+p.bcutis <- ggpar(p.bcutis,xtickslab.rt = 45)
+p.bcutis
+#create abundance plot from Maaslin results
+species='Clostridioides.difficile'
+df = data.frame(abundance = relab[,species],
+                group = sub.metadata$time,
+                tag = sub.metadata$GroupxCluster,
+                case = sub.metadata$group,
+                cluster = sub.metadata$cluster,
+                timetag = sub.metadata$ClusterxTime
+)
+
+df$cluster = factor(gsub(df$cluster,pattern = 'IBS',replacement = 'cl'))
+df$group = factor(gsub(df$group,pattern = 'A',replacement = 'Pre-Diet'))
+df$group = factor(gsub(df$group,pattern = 'B',replacement = 'On Diet'))
+df$group = factor(df$group,levels = c('Pre-Diet','On Diet'))
+
+df$tag = factor(gsub(df$tag,pattern = 'IBS',replacement = 'cl'))
+df$tag = factor(df$tag,labels = c('Case-IBSP','Case-IBSH','Control-IBSP','Control-IBSH'))
+df$tag = factor(df$tag,levels = c('Case-IBSP','Control-IBSP','Case-IBSH','Control-IBSH'))
+
+
+p <- ggboxplot(df, x = "tag", y = "abundance",
+                color = "timetag",palette=c('firebrick2','red4','dodgerblue','darkblue'),shape="case",add='jitter',facet.by = 'group')
+ p.cdiff <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('Case-IBSH','Control-IBSH'),c('Case-IBSP','Control-IBSP'),c('Case-IBSH','Case-IBSP'),c('Control-IBSH','Control-IBSP'))) + ylab('CLR abundance') + xlab('') + rremove('legend') + ggtitle(species) + font("title", face = "italic") + font("x.text", size = 9)
+
+p.cdiff <- ggpar(p.cdiff,xtickslab.rt = 45)
+p.cdiff
+#create abundance plot from Maaslin results
+species='Streptococcus.parasanguinis'
+
+df = data.frame(abundance = relab[,species],
+                group = sub.metadata$time,
+                tag = sub.metadata$GroupxCluster,
+                case = sub.metadata$group,
+                cluster = sub.metadata$cluster,
+                timetag = sub.metadata$ClusterxTime
+)
+
+df$cluster = factor(gsub(df$cluster,pattern = 'IBS',replacement = 'cl'))
+df$group = factor(gsub(df$group,pattern = 'A',replacement = 'Pre-Diet'))
+df$group = factor(gsub(df$group,pattern = 'B',replacement = 'On Diet'))
+df$group = factor(df$group,levels = c('Pre-Diet','On Diet'))
+
+df$tag = factor(gsub(df$tag,pattern = 'IBS',replacement = 'cl'))
+df$tag = factor(df$tag,labels = c('Case-IBSP','Case-IBSH','Control-IBSP','Control-IBSH'))
+df$tag = factor(df$tag,levels = c('Case-IBSP','Control-IBSP','Case-IBSH','Control-IBSH'))
+
+p <- ggboxplot(df, x = "tag", y = "abundance",
+                color = "timetag",palette=c('firebrick2','red4','dodgerblue','darkblue'),shape="case",add='jitter',facet.by = 'group')
+ p.csordellii <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('Case-IBSH','Control-IBSH'),c('Case-IBSP','Control-IBSP'),c('Case-IBSH','Case-IBSP'),c('Control-IBSH','Control-IBSP'))) + ylab('CLR abundance') + xlab('') + rremove('legend') + ggtitle(species) + font("title", face = "italic") + font("x.text", size = 9)
+p.csordellii <- ggpar(p.csordellii,xtickslab.rt = 45)
+p.csordellii
+```
+
+```{r}
+ 
+ initial_grid <- plot_grid(p.bsteco,p.bcutis,p.cdiff,p.csordellii,
+          labels=c('(A)','(B)','(C)', '(D)'),ncol=2)
+ 
+svg(filename = 'maaslinAB_withcontrol.svg',width = 15, height =10)
+ ggdraw(initial_grid) +
+   draw_plot(initial_grid)
+ dev.off()
+```
+
+
+### generate a pcoa with controls for diet intervention
+
+```{r}
+
+dis <- dist(as.matrix(ps3@otu_table),method='euclidean')
+
+mod<-betadisper(dis,paste(ifelse(ps3@sam_data$group == 'Case',yes=ps3@sam_data$cluster,no='Control'),ps3@sam_data$time,sep='-'))
+
+
+df.pcoa = data.frame(x=mod$vectors[,1],y=mod$vectors[,2],group=mod$group)
+centroids = data.frame(x=mod$centroids[,1],y=mod$centroids[,2],group = factor(rownames(mod$centroids)))
+ 
+gg <- merge(df.pcoa,centroids, by ='group', suffixes = c('','.centroid')) 
+
+#gg$group = factor(gsub(pattern = 'IBS',replacement = 'cl',x=gg$group))
+gg$group = factor(gsub(pattern = 'IBS1',replacement = 'IBSP',x=gg$group))
+gg$group = factor(gsub(pattern = 'IBS2',replacement = 'IBSH',x=gg$group))
+
+#centroids$group = factor(gsub(pattern = 'IBS',replacement = 'cl',x=centroids$group))
+centroids$group = factor(gsub(pattern = 'IBS1',replacement = 'IBSP',x=centroids$group))
+centroids$group = factor(gsub(pattern = 'IBS2',replacement = 'IBSH',x=centroids$group))
+
+gg$group = factor(gsub(pattern = '-A',replacement = '-Pre Diet',x=gg$group))
+gg$group = factor(gsub(pattern = '-B',replacement = '-On Diet',x=gg$group))
+gg$group = factor(gg$group,levels=c('IBSP-Pre Diet','IBSP-On Diet','IBSH-Pre Diet','IBSH-On Diet','Control-Pre Diet','Control-On Diet'))
+
+centroids$group = factor(gsub(pattern = '-A',replacement = '-Pre Diet',x=centroids$group))
+centroids$group = factor(gsub(pattern = '-B',replacement = '-On Diet',x=centroids$group))
+
+centroids$group  = factor(centroids$group ,levels=c('IBSP-Pre Diet','IBSP-On Diet','IBSH-Pre Diet','IBSH-On Diet','Control-Pre Diet','Control-On Diet'))
+
+ppcoadiet_ctrl <- ggplot(gg) +
+  geom_point(aes(x=x,y=y,color=group),size=1,alpha=0.4) + scale_color_manual(values = c('red4','firebrick2','darkblue','dodgerblue','grey30','grey70')) +
+  geom_point(data=centroids,aes(x=x,y=y,color=group),size=4)+
+  geom_segment(aes(x=x.centroid, y =y.centroid, xend=x,yend=y,color=group),alpha=0.2) +
+  xlab(paste('PCoA1 (',100*round(mod$eig[1] / sum(mod$eig),2),'%)',sep='')) +
+  ylab(paste('PCoA2 (',100*round(mod$eig[2] / sum(mod$eig),2),'%)',sep='')) + theme_bw() + guides(col=guide_legend(nrow=2)) + labs(color='') + theme(legend.position = c(0.7,0.87))
+
+ppcoadiet_ctrl
+```
+
+
+```{r}
+
+initial_grid <- plot_grid(p.csordellii,p.bsteco,
+                          labels=c('(B)','(C)'),ncol=2)
+
+cluster_grid <- plot_grid(NULL,ppcoadiet_ctrl,NULL,ncol=3,labels=c('','(A)',''), rel_widths = c(0.1,1, 0.05),hjust = 1)
+
+  nested_grid <- plot_grid(cluster_grid,initial_grid,
+          labels=c('',''),ncol=1,hjust = c(1,1))
+
+ 
+svg(filename = 'diet_impact_3panels_withcontrol_and_species.svg',width =8, height =8)
+ ggdraw(nested_grid) +
+   draw_plot(nested_grid)
+ dev.off()
+ 
+ 
+```
+
+### Functional work with diet impact
+```{r}
+
+functions <- read.csv('data/humann3_pathabundance_all_except_timepoint_C.csv', check.names=FALSE)
+functions[1:5,1:5]
+#sub.metadata.ab
+#relab.ab
+idx = which(ps3@sam_data$time %in% c('A','B') & ps3@sam_data$group == 'Case')
+samples = as.character(ps3@sam_data$sangerID[idx])
+length(samples)
+
+colnames(functions)[1] = 'Sample_ID'
+sub.functions = functions[which(functions$Sample_ID %in% samples),]
+
+dim(sub.functions)
+rownames(sub.functions) = samples
+```
+
+example of a 'bad' function
+```{r}
+species = grep(colnames(sub.functions),pattern = 'trehalose',value=TRUE) #other candidate
+#species = grep(colnames(sub.functions),pattern = 'sucrose degradation IV',value=TRUE)
+df = data.frame(abundance = 100*sub.functions[,species],
+                group = paste(ps3@sam_data$cluster,ps3@sam_data$time,sep='-')[idx]
+)
+
+df$group = factor(gsub(df$group,pattern = 'IBS',replacement = 'cl'))
+df$group = factor(gsub(df$group,pattern = 'A',replacement = 'Pre-Diet'))
+df$group = factor(gsub(df$group,pattern = 'B',replacement = 'On Diet'))
+df$group = factor(df$group,labels = c('IBSP-On Diet','IBSP-Pre-Diet','IBSH-On Diet','IBSH-Pre-Diet'))
+df$group = factor(df$group,levels = c('IBSP-Pre-Diet','IBSP-On Diet','IBSH-Pre-Diet','IBSH-On Diet'))
+p <- ggboxplot(df, x = "group", y = "abundance",
+                color = "group",palette=c('firebrick2','red4','dodgerblue','darkblue'),
+                add = "jitter")
+
+#species = "PWY-5384: sucrose degradation IV"
+species = "trehalose degradation V"
+
+ p.badfun <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('IBSP-Pre-Diet','IBSP-On Diet'),c('IBSH-Pre-Diet','IBSH-On Diet'),c('IBSP-Pre-Diet','IBSH-Pre-Diet'),c('IBSP-On Diet','IBSH-On Diet'))) + ylab('relative abundance (%)') + xlab('') + rremove('legend') + ggtitle(species) + yscale('log10') + font("x.text", size = 9)
+#p.badfun <- ggpar(p.badfun,xtickslab.rt = 45)
+p.badfun
+```
+
+```{r}
+#create figure 5E with glycolysis
+species = 'GLYCOLYSIS: glycolysis I (from glucose 6-phosphate)'
+df = data.frame(abundance = 100*sub.functions[,species],
+                group = paste(ps3@sam_data$cluster,ps3@sam_data$time,sep='-')[idx]
+)
+
+df$group = factor(gsub(df$group,pattern = 'IBS',replacement = 'cl'))
+df$group = factor(gsub(df$group,pattern = 'A',replacement = 'Pre-Diet'))
+df$group = factor(gsub(df$group,pattern = 'B',replacement = 'On Diet'))
+df$group = factor(df$group,labels = c('IBSP-On Diet','IBSP-Pre-Diet','IBSH-On Diet','IBSH-Pre-Diet'))
+df$group = factor(df$group,levels = c('IBSP-Pre-Diet','IBSP-On Diet','IBSH-Pre-Diet','IBSH-On Diet'))
+p <- ggboxplot(df, x = "group", y = "abundance",
+                color = "group",palette=c('firebrick2','red4','dodgerblue','darkblue'),
+                add = "jitter")
+ p.badfun2 <- p + stat_compare_means(label= 'p.signif',comparisons = list(c('IBSP-Pre-Diet','IBSP-On Diet'),c('IBSH-Pre-Diet','IBSH-On Diet'),c('IBSP-Pre-Diet','IBSH-Pre-Diet'),c('IBSP-On Diet','IBSH-On Diet'))) + ylab('relative abundance (%)') + xlab('') + rremove('legend') + ggtitle('GLYCOLYSIS: glycolysis I') + yscale('log10') + font("x.text", size = 9)
+#p.badfun <- ggpar(p.badfun,xtickslab.rt = 45)
+p.badfun2
+```
+
+
+```{r}
+#initial_grid <- plot_grid(p.cdiff.caseonly,p.bsteco.caseonly,p.badfun,p.goodfun, # we decided to not show 'good' functions
+initial_grid <- plot_grid(p.cdiff.caseonly,p.bsteco.caseonly,p.badfun,p.badfun2,
+                          labels=c('(B)','(C)','(D)','(E)'),ncol=2)
+
+#p.csordellii.caseonly
+cluster_grid <- plot_grid(NULL,ppcoadiet_ctrl,NULL,ncol=3,labels=c('','(A)',''), rel_widths = c(0.1,1, 0.1),hjust = 1)
+
+  nested_grid <- plot_grid(cluster_grid,initial_grid,
+          labels=c('',''),ncol=1,hjust = c(1,1))
+
+ 
+svg(filename = 'diet_impact_3panels_withcontrol_and_species_and_functions.svg',width =10, height =13)
+ ggdraw(nested_grid) +
+   draw_plot(nested_grid)
+ dev.off()
+ 
+ 
+```
+
+## Change from time B to C
+```{r}
+
+#store cluster labels info just for cases
+cluster.label.cases = ps2@sam_data$cluster[which(ps2@sam_data$group == 'Case')]
+names(cluster.label.cases) = ps2@sam_data$sangerID[which(ps2@sam_data$group == 'Case')]
+  
+#subset data for B anc C time points
+ idx = which(metadata$time == 'C' | metadata$time == 'B') 
+ idx2 = names(which(table(metadata$pair[idx]) == 4)) # 
+ sub.meta = metadata[which(metadata$pair %in% idx2),]
+ sub.tmp = tmp[which(metadata$pair %in% idx2),]
+ sub.tmp = sub.tmp[which(sub.meta$time == 'C' | sub.meta$time == 'B'),] # 96 samples = 4 time 24
+ sub.meta = sub.meta[which(sub.meta$time == 'C' | sub.meta$time == 'B'),] 
+ ps <- phyloseq(sample_data(sub.meta),
+                  otu_table(sub.tmp, taxa_are_rows = FALSE))
+ 
+# Transformation to CoDA
+sum(ps@otu_table == 0)
+100*sum(ps@otu_table == 0)/length(ps@otu_table)
+
+prevalence = 100*apply(ps@otu_table,2,function(x) sum(x>0)/length(x))
+total.read.count = apply(ps@otu_table,2,sum)
+
+## Filter rare taxa -->NONE
+
+#  Define prevalence threshold as 10% of total samples
+prevalenceThreshold = 0.1 * nsamples(ps)
+prevalenceThreshold
+
+# Execute prevalence filter, using `prune_taxa()` function
+keepTaxa = names(prevalence)[(prevalence >= prevalenceThreshold)]
+ps1 = prune_taxa(keepTaxa, ps)
+
+
+## Estimate zeros
+d.czm <- cmultRepl(ps1@otu_table,  label=0, method="CZM")
+d.clr <- t(apply(d.czm, 1, function(x){log(x) - mean(log(x))}))
+ps2 = ps1
+ps2@otu_table = otu_table(d.clr, taxa_are_rows = FALSE)
+
+
+dis<-dist(as.matrix(ps2@otu_table),method='euclidean')
+# equivalent to Aitchinson distance: Eucidean on CLR profiles
+
+mod<-betadisper(dis,paste(ps2@sam_data$group,ps2@sam_data$time,sep='-'))
+
+```
+
+### Intra/Inter-pair variability
+```{r}
+dis = as.matrix(dis)
+intra.A = NULL
+inter.A = NULL
+intra.B = NULL
+inter.B = NULL
+for(p in unique(ps2@sam_data$pair)){
+  intra.A = c(intra.A,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$group == 'Control' & ps2@sam_data$time == 'C')],ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$group == 'Case'& ps2@sam_data$time == 'C')]])
+  
+  inter.A = c(inter.A,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$group == 'Control' & ps2@sam_data$time == 'C')],ps2@sam_data$sangerID[which(ps2@sam_data$pair!=p & ps2@sam_data$group == 'Case' & ps2@sam_data$time == 'C')]])
+  
+    intra.B = c(intra.B,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$group == 'Control' & ps2@sam_data$time == 'B')],ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$group == 'Case'& ps2@sam_data$time == 'B')]])
+  
+  inter.B = c(inter.B,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$group == 'Control' & ps2@sam_data$time == 'B')],ps2@sam_data$sangerID[which(ps2@sam_data$pair!=p & ps2@sam_data$group == 'Case' & ps2@sam_data$time == 'B')]])
+  
+}
+
+df = data.frame('dist' = c(intra.A,inter.A,intra.B,inter.B),
+                'group' = c(rep('intra-T2',length(intra.A)),rep('inter-T2',length(inter.A)),rep('intra-T1',length(intra.B)),rep('inter-T1',length(inter.B))))
+df$group = factor(df$group,levels=c('inter-T1','intra-T1','inter-T2','intra-T2'))
+
+
+p <- ggboxplot(df, x = "group", y = "dist",
+                color = "group", palette =mypalette,
+                add = "jitter")
+p + stat_compare_means(comparisons = list(c('intra-T2','inter-T2'),c('intra-T1','inter-T1'),c('intra-T2','intra-T1'),c('inter-T2','inter-T1')))    + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ylab('Aitchison distance')
+
+```
+
+### Patient clusters
+
+```{r}
+
+ps2@sam_data$cluster = cluster.label.cases[match(ps2@sam_data$sangerID, names(cluster.label.cases))]
+
+
+for(patient in unique(ps2@sam_data$patient)){
+  if(any(!is.na(ps2@sam_data$cluster[which(ps2@sam_data$patient == patient)]))) ps2@sam_data$cluster[which(ps2@sam_data$patient == patient)][is.na(ps2@sam_data$cluster[which(ps2@sam_data$patient == patient)])] = ps2@sam_data$cluster[which(ps2@sam_data$patient == patient)][!is.na(ps2@sam_data$cluster[which(ps2@sam_data$patient == patient)])]
+}
+
+table(ps2@sam_data$cluster)/2 # 14 cases in IBS1 and 7 in IBS2
+# 3 pairs were not assigned to a cluster
+
+
+idx = which(is.na(ps2@sam_data$cluster))
+idx2 = as.character(ps2@sam_data$sangerID[-idx])
+
+ps3 <-  phyloseq(sample_data(ps2@sam_data[-idx,]),
+                 otu_table(ps2@otu_table[idx2,], taxa_are_rows = FALSE))
+
+
+dis <- dist(as.matrix(ps3@otu_table),method='euclidean')
+
+mod<-betadisper(dis,paste(ps3@sam_data$cluster,ps3@sam_data$time,sep='-'))
+res <- permutest(mod, pairwise = TRUE, permutations = 10000)
+res
+
+set.seed(42)
+adonis2(dis~cluster+time,data=data.frame(ps3@sam_data),permutations = 10000)
+
+
+plot(mod, ellipse = FALSE, hull = TRUE, conf = 0.90,main = 'CLR data colored by status', 
+     xlab = paste('PCoA1 (',100*round(mod$eig[1] / sum(mod$eig),2),'%)',sep=''),
+     ylab = paste('PCoA2 (',100*round(mod$eig[2] / sum(mod$eig),2),'%)',sep=''),col=mypalette,segments=FALSE,pch=rep(16,nsamples(ps3)),label=FALSE ) # 90% data ellipse, could be changed by conf value
+legend(x='topleft',legend = sort(unique(paste(ps3@sam_data$cluster,ps3@sam_data$time,sep='-'))),fill =mypalette)
+
+
+# looks like the 6 months time point (C) is departing/relapse?
+```
+
+```{r}
+df.pcoa = data.frame(x=-mod$vectors[,1],y=-mod$vectors[,2],group=mod$group)
+centroids = data.frame(x=-mod$centroids[,1],y=-mod$centroids[,2],group = factor(rownames(mod$centroids)))
+ 
+gg <- merge(df.pcoa,centroids, by ='group', suffixes = c('','.centroid')) 
+
+gg$group = factor(gsub(pattern = 'IBS',replacement = 'cl',x=gg$group))
+centroids$group = factor(gsub(pattern = 'IBS',replacement = 'cl',x=centroids$group))
+
+gg$group = factor(gsub(pattern = '-C',replacement = '-Post Diet',x=gg$group))
+gg$group = factor(gsub(pattern = '-B',replacement = '-On Diet',x=gg$group))
+gg$group = factor(gg$group,labels=c('IBSP-On Diet','IBSP-Post Diet','IBSH-On Diet','IBSH-Post Diet'))
+
+centroids$group = factor(gsub(pattern = '-C',replacement = '-Post Diet',x=centroids$group))
+centroids$group = factor(gsub(pattern = '-B',replacement = '-On Diet',x=centroids$group))
+centroids$group = factor(centroids$group,labels=c('IBSP-On Diet','IBSP-Post Diet','IBSH-On Diet','IBSH-Post Diet'))
+
+ppcoadietpost <- ggplot(gg) +
+  geom_point(aes(x=x,y=y,color=group),size=1,alpha=0.4) + scale_color_manual(values = c('red4','violetred2','darkblue','deepskyblue4')) +
+  geom_point(data=centroids,aes(x=x,y=y,color=group),size=4)+
+  geom_segment(aes(x=x.centroid, y =y.centroid, xend=x,yend=y,color=group)) +
+  xlab(paste('PCoA1 (',100*round(mod$eig[1] / sum(mod$eig),2),'%)',sep='')) +
+  ylab(paste('PCoA2 (',100*round(mod$eig[2] / sum(mod$eig),2),'%)',sep='')) + theme_bw() + guides(col=guide_legend(nrow=2)) + labs(color='') + theme(legend.position = c(0.2,0.15))
+
+ppcoadietpost
+
+```
+
+between cluster dissimilarity for cases only at 2 different time points
+```{r}
+dis <- dist(as.matrix(ps2@otu_table),method='euclidean')
+
+dis = as.matrix(dis)
+intra.cl1C = NULL
+intra.cl1B = NULL
+intra.cl2C= NULL
+intra.cl2B = NULL
+inter.C = NULL
+inter.B = NULL
+inter.cl1 = NULL
+inter.cl2 = NULL
+
+for(p in unique(ps2@sam_data$pair)){
+  #IBS1 case
+  if(any(ps2@sam_data$cluster[which(ps2@sam_data$pair==p)] == 'IBS1',na.rm = TRUE)){
+    #this case vs all ibs2 - timepoint C
+    inter.C = c(inter.C,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'C' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair != p & ps2@sam_data$time == 'C' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS2')]])
+
+     #this case vs all ibs2- timepoint B
+    inter.B = c(inter.B,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair != p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS2')]])
+
+        #this case vs all ibs1 - timepoint C
+    intra.cl1C = c(intra.cl1C,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'C' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair != p & ps2@sam_data$time == 'C' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS1')]])
+
+     #this case vs all ibs1- timepoint B
+    intra.cl1B = c(intra.cl1B,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair != p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS1')]])
+    # this case acros time points
+    inter.cl1 = c(inter.cl1,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'C' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair == p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS1')]])
+    
+    
+  }else{#IBS2 case
+    #this case vs all ibs1 - timepoint A
+    inter.C = c(inter.C,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'C' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair != p & ps2@sam_data$time == 'C' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS1')]])
+
+     #this case vs all ibs1- timepoint B
+    inter.B = c(inter.B,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair != p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS1')]])
+
+        #this case vs all ibs2 - timepoint A
+    intra.cl2C = c(intra.cl2C,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'C' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair != p & ps2@sam_data$time == 'C' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS2')]])
+
+     #this case vs all ibs2- timepoint B
+    intra.cl2B = c(intra.cl2B,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair != p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS2')]])
+        # this case acros time points
+    inter.cl2 = c(inter.cl2,dis[ps2@sam_data$sangerID[which(ps2@sam_data$pair==p & ps2@sam_data$time == 'C' & ps2@sam_data$group == 'Case')],ps2@sam_data$sangerID[which(ps2@sam_data$pair == p & ps2@sam_data$time == 'B' & ps2@sam_data$group == 'Case' & ps2@sam_data$cluster == 'IBS2')]])
+  }
+}
+
+
+df = data.frame('dist' = c(inter.C,inter.B, inter.cl1, inter.cl2),
+                'group' = c(rep('between clusters\nPost-Diet',length(inter.C)),rep('between clusters\nOn Diet',length(inter.B)),rep('within IBSP\ntwo timepoints',length(inter.cl1)),rep('within IBSH\ntwo timepoints',length(inter.cl2)) ))
+
+df$group = factor(df$group, levels = c('between clusters\nOn Diet','between clusters\nPost-Diet','within IBSP\ntwo timepoints','within IBSH\ntwo timepoints'))
+
+p <- ggboxplot(df, x = "group", y = "dist",
+                color = "group", palette =c('purple4','darkviolet','red','blue'),
+                add = "jitter")
+ptimepointbetaBC <- p + stat_compare_means(method.args=list(alternative='greater'),comparisons = list(c('between clusters\nPost-Diet','between clusters\nOn Diet'),
+                                        c('within IBSP\ntwo timepoints','within IBSH\ntwo timepoints')),label = "p.signif") + ylab('Aitchison distance') + theme(legend.title=element_blank()) + theme(legend.position = "none") + xlab('')
+
+ptimepointbetaBC
+
+```
+
+```{r}
+ 
+ initial_grid <- plot_grid(ppcoadietpost,ptimepointbetaBC,
+          labels=c('(A)','(B)'),ncol=2)
+
+
+svg(filename = 'dietimpact_post.svg',width = 15, height =6)
+ ggdraw(initial_grid) +
+   draw_plot(initial_grid)
+ dev.off()
+ 
+```
+
